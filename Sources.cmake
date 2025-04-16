@@ -188,7 +188,7 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/include/Luau/Documentation.h
     Analysis/include/Luau/Error.h
     Analysis/include/Luau/EqSatSimplification.h
-    Analysis/include/Luau/FileResolver.h
+        Analysis/include/Luau/FileResolver.h
     Analysis/include/Luau/FragmentAutocomplete.h
     Analysis/include/Luau/Frontend.h
     Analysis/include/Luau/Generalization.h
