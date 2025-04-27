@@ -25,6 +25,10 @@ LUAU_FASTFLAG(DebugLuauEqSatSimplification)
 LUAU_FASTFLAG(LuauUngeneralizedTypesForRecursiveFunctions)
 LUAU_FASTFLAG(LuauImproveTypePathsInErrors)
 LUAU_FASTFLAG(LuauReduceUnionFollowUnionType)
+LUAU_FASTFLAG(LuauArityMismatchOnUndersaturatedUnknownArguments)
+LUAU_FASTFLAG(LuauHasPropProperBlock)
+LUAU_FASTFLAG(LuauOptimizeFalsyAndTruthyIntersect)
+LUAU_FASTFLAG(LuauFormatUseLastPosition)
 
 TEST_SUITE_BEGIN("TypeInferFunctions");
 
@@ -2017,6 +2021,11 @@ TEST_CASE_FIXTURE(Fixture, "free_is_not_bound_to_unknown")
 
 TEST_CASE_FIXTURE(Fixture, "dont_infer_parameter_types_for_functions_from_their_call_site")
 {
+    ScopedFastFlag sffs[] = {
+        {FFlag::LuauHasPropProperBlock, true},
+        {FFlag::LuauOptimizeFalsyAndTruthyIntersect, true}
+    };
+
     CheckResult result = check(R"(
         local t = {}
 
@@ -2034,13 +2043,20 @@ TEST_CASE_FIXTURE(Fixture, "dont_infer_parameter_types_for_functions_from_their_
         local f = t.f
     )");
 
-    LUAU_REQUIRE_NO_ERRORS(result);
 
     CHECK_EQ("<a>(a) -> a", toString(requireType("f")));
+
     if (FFlag::LuauSolverV2)
-        CHECK_EQ("({ read p: { read q: unknown } }) -> ~(false?)?", toString(requireType("g")));
+    {
+        // FIXME CLI-143852: Depends on interleaving generalization and type function reduction.
+        LUAU_REQUIRE_ERRORS(result);
+        CHECK_EQ("({ read p: unknown }) -> (*error-type* | ~(false?))?", toString(requireType("g")));
+    }
     else
+    {
+        LUAU_REQUIRE_NO_ERRORS(result);
         CHECK_EQ("({+ p: {+ q: nil +} +}) -> nil", toString(requireType("g")));
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "dont_mutate_the_underlying_head_of_typepack_when_calling_with_self")
@@ -2093,7 +2109,10 @@ u.b().foo()
         CHECK_EQ(toString(result.errors[2]), "Argument count mismatch. Function expects 1 to 3 arguments, but none are specified");
         CHECK_EQ(toString(result.errors[3]), "Argument count mismatch. Function expects 2 to 4 arguments, but none are specified");
         CHECK_EQ(toString(result.errors[4]), "Argument count mismatch. Function expects at least 1 argument, but none are specified");
-        CHECK_EQ(toString(result.errors[5]), "Argument count mismatch. Function expects 2 to 3 arguments, but only 1 is specified");
+        if (FFlag::LuauArityMismatchOnUndersaturatedUnknownArguments)
+            CHECK_EQ(toString(result.errors[5]), "Argument count mismatch. Function expects 3 arguments, but only 1 is specified");
+        else
+            CHECK_EQ(toString(result.errors[5]), "Argument count mismatch. Function expects 2 to 3 arguments, but only 1 is specified");
         CHECK_EQ(toString(result.errors[6]), "Argument count mismatch. Function expects at least 1 argument, but none are specified");
         CHECK_EQ(toString(result.errors[7]), "Argument count mismatch. Function expects at least 1 argument, but none are specified");
         CHECK_EQ(toString(result.errors[8]), "Argument count mismatch. Function expects at least 1 argument, but none are specified");
@@ -2257,7 +2276,7 @@ end
     LUAU_REQUIRE_ERRORS(result);
 }
 
-TEST_CASE_FIXTURE(BuiltinsFixture, "dont_assert_when_the_tarjan_limit_is_exceeded_during_generalization")
+TEST_CASE_FIXTURE(Fixture, "dont_assert_when_the_tarjan_limit_is_exceeded_during_generalization")
 {
     ScopedFastFlag sff{FFlag::LuauSolverV2, true};
     ScopedFastInt sfi{FInt::LuauTarjanChildLimit, 1};
@@ -2268,9 +2287,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "dont_assert_when_the_tarjan_limit_is_exceede
         end
     )");
 
-    LUAU_REQUIRE_ERROR_COUNT(1, result);
-
-    CHECK_MESSAGE(get<UnificationTooComplex>(result.errors[0]), "Expected UnificationTooComplex but got: " << toString(result.errors[0]));
+    LUAU_REQUIRE_ERROR(result, UnificationTooComplex);
 }
 
 /* We had a bug under DCR where instantiated type packs had a nullptr scope.
@@ -2790,7 +2807,7 @@ TEST_CASE_FIXTURE(Fixture, "bidirectional_checking_of_callback_property")
     }
 }
 
-TEST_CASE_FIXTURE(ClassFixture, "bidirectional_inference_of_class_methods")
+TEST_CASE_FIXTURE(ExternTypeFixture, "bidirectional_inference_of_class_methods")
 {
     CheckResult result = check(R"(
         local c = ChildClass.New()
@@ -2986,6 +3003,8 @@ TEST_CASE_FIXTURE(Fixture, "fuzzer_missing_follow_in_ast_stat_fun")
 
 TEST_CASE_FIXTURE(Fixture, "unifier_should_not_bind_free_types")
 {
+    ScopedFastFlag _{FFlag::LuauOptimizeFalsyAndTruthyIntersect, true};
+
     CheckResult result = check(R"(
         function foo(player)
             local success,result = player:thing()
@@ -3013,7 +3032,7 @@ TEST_CASE_FIXTURE(Fixture, "unifier_should_not_bind_free_types")
         auto tm2 = get<TypePackMismatch>(result.errors[1]);
         REQUIRE(tm2);
         CHECK(toString(tm2->wantedTp) == "string");
-        CHECK(toString(tm2->givenTp) == "(buffer | class | function | number | string | table | thread | true) & unknown");
+        CHECK(toString(tm2->givenTp) == "~(false?)");
     }
     else
     {
@@ -3213,6 +3232,26 @@ TEST_CASE_FIXTURE(Fixture, "fuzz_unwind_mutually_recursive_union_type_func")
     CHECK_EQ(err0->name, "l100");
     auto err1 = get<NotATable>(result.errors[1]);
     CHECK(err1);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "string_format_pack")
+{
+    ScopedFastFlag _{FFlag::LuauFormatUseLastPosition, true};
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        local function foo(): (string, string, string)
+            return "", "", ""
+        end
+        print(string.format("%s %s %s", foo()))
+    )"));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "string_format_pack_variadic")
+{
+    ScopedFastFlag _{FFlag::LuauFormatUseLastPosition, true};
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        local foo : () -> (...string) = (nil :: any)
+        print(string.format("%s %s %s", foo()))
+    )"));
 }
 
 TEST_SUITE_END();

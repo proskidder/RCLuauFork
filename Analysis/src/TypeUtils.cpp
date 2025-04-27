@@ -11,10 +11,8 @@
 #include <algorithm>
 
 LUAU_FASTFLAG(LuauSolverV2);
-LUAU_FASTFLAG(LuauAutocompleteRefactorsForIncrementalAutocomplete);
-LUAU_FASTFLAG(LuauTrackInteriorFreeTypesOnScope);
 LUAU_FASTFLAG(LuauFreeTypesMustHaveBounds)
-LUAU_FASTFLAG(LuauNonReentrantGeneralization)
+LUAU_FASTFLAG(LuauNonReentrantGeneralization2)
 LUAU_FASTFLAG(LuauDisableNewSolverAssertsInMixedMode)
 
 namespace Luau
@@ -308,7 +306,7 @@ TypePack extendTypePack(
             TypePack newPack;
             newPack.tail = arena.freshTypePack(ftp->scope, ftp->polarity);
 
-            if (FFlag::LuauNonReentrantGeneralization)
+            if (FFlag::LuauNonReentrantGeneralization2)
                 trackInteriorFreeTypePack(ftp->scope, *newPack.tail);
 
             if (FFlag::LuauSolverV2)
@@ -327,8 +325,7 @@ TypePack extendTypePack(
                     {
                         FreeType ft{ftp->scope, builtinTypes->neverType, builtinTypes->unknownType, ftp->polarity};
                         t = arena.addType(ft);
-                        if (FFlag::LuauTrackInteriorFreeTypesOnScope)
-                            trackInteriorFreeType(ftp->scope, t);
+                        trackInteriorFreeType(ftp->scope, t);
                     }
                     else
                         t = FFlag::LuauFreeTypesMustHaveBounds ? arena.freshType(builtinTypes, ftp->scope) : arena.freshType_DEPRECATED(ftp->scope);
@@ -438,7 +435,6 @@ TypeId stripNil(NotNull<BuiltinTypes> builtinTypes, TypeArena& arena, TypeId ty)
 
 ErrorSuppression shouldSuppressErrors(NotNull<Normalizer> normalizer, TypeId ty)
 {
-    LUAU_ASSERT(FFlag::LuauSolverV2 || FFlag::LuauAutocompleteRefactorsForIncrementalAutocomplete);
     std::shared_ptr<const NormalizedType> normType = normalizer->normalize(ty);
 
     if (!normType)
@@ -556,10 +552,8 @@ std::vector<TypeId> findBlockedArgTypesIn(AstExprCall* expr, NotNull<DenseHashMa
 
 void trackInteriorFreeType(Scope* scope, TypeId ty)
 {
-    if (FFlag::LuauDisableNewSolverAssertsInMixedMode)
-        LUAU_ASSERT(FFlag::LuauTrackInteriorFreeTypesOnScope);
-    else
-        LUAU_ASSERT(FFlag::LuauSolverV2 && FFlag::LuauTrackInteriorFreeTypesOnScope);
+    if (!FFlag::LuauDisableNewSolverAssertsInMixedMode)
+        LUAU_ASSERT(FFlag::LuauSolverV2);
     for (; scope; scope = scope->parent.get())
     {
         if (scope->interiorFreeTypes)
@@ -577,7 +571,7 @@ void trackInteriorFreeType(Scope* scope, TypeId ty)
 void trackInteriorFreeTypePack(Scope* scope, TypePackId tp)
 {
     LUAU_ASSERT(tp);
-    if (!FFlag::LuauNonReentrantGeneralization)
+    if (!FFlag::LuauNonReentrantGeneralization2)
         return;
 
     for (; scope; scope = scope->parent.get())

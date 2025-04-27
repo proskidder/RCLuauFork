@@ -2,12 +2,10 @@
 #include "Luau/Substitution.h"
 
 #include "Luau/Common.h"
-#include "Luau/Clone.h"
 #include "Luau/TxnLog.h"
 #include "Luau/Type.h"
 
 #include <algorithm>
-#include <stdexcept>
 
 LUAU_FASTINTVARIABLE(LuauTarjanChildLimit, 10000)
 LUAU_FASTFLAG(LuauSolverV2)
@@ -18,9 +16,9 @@ LUAU_FASTFLAG(LuauDeprecatedAttribute)
 namespace Luau
 {
 
-static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool alwaysClone)
+static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log)
 {
-    auto go = [ty, &dest, alwaysClone](auto&& a)
+    auto go = [ty, &dest](auto&& a)
     {
         using T = std::decay_t<decltype(a)>;
 
@@ -138,15 +136,10 @@ static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool a
             clone.parts = a.parts;
             return dest.addType(std::move(clone));
         }
-        else if constexpr (std::is_same_v<T, ClassType>)
+        else if constexpr (std::is_same_v<T, ExternType>)
         {
-            if (alwaysClone)
-            {
-                ClassType clone{a.name, a.props, a.parent, a.metatable, a.tags, a.userData, a.definitionModuleName, a.definitionLocation, a.indexer};
-                return dest.addType(std::move(clone));
-            }
-            else
-                return ty;
+            ExternType clone{a.name, a.props, a.parent, a.metatable, a.tags, a.userData, a.definitionModuleName, a.definitionLocation, a.indexer};
+            return dest.addType(std::move(clone));
         }
         else if constexpr (std::is_same_v<T, NegationType>)
             return dest.addType(NegationType{a.ty});
@@ -259,21 +252,21 @@ void Tarjan::visitChildren(TypeId ty, int index)
         for (TypePackId a : tfit->packArguments)
             visitChild(a);
     }
-    else if (const ClassType* ctv = get<ClassType>(ty))
+    else if (const ExternType* etv = get<ExternType>(ty))
     {
-        for (const auto& [name, prop] : ctv->props)
+        for (const auto& [name, prop] : etv->props)
             visitChild(prop.type());
 
-        if (ctv->parent)
-            visitChild(*ctv->parent);
+        if (etv->parent)
+            visitChild(*etv->parent);
 
-        if (ctv->metatable)
-            visitChild(*ctv->metatable);
+        if (etv->metatable)
+            visitChild(*etv->metatable);
 
-        if (ctv->indexer)
+        if (etv->indexer)
         {
-            visitChild(ctv->indexer->indexType);
-            visitChild(ctv->indexer->indexResultType);
+            visitChild(etv->indexer->indexType);
+            visitChild(etv->indexer->indexResultType);
         }
     }
     else if (const NegationType* ntv = get<NegationType>(ty))
@@ -547,6 +540,27 @@ void Tarjan::visitSCC(int index)
     }
 }
 
+bool Tarjan::ignoreChildren(TypeId ty)
+{
+    return false;
+}
+
+bool Tarjan::ignoreChildren(TypePackId ty)
+{
+    return false;
+}
+
+// Some subclasses might ignore children visit, but not other actions like replacing the children
+bool Tarjan::ignoreChildrenVisit(TypeId ty)
+{
+    return ignoreChildren(ty);
+}
+
+bool Tarjan::ignoreChildrenVisit(TypePackId ty)
+{
+    return ignoreChildren(ty);
+}
+
 TarjanResult Tarjan::findDirty(TypeId ty)
 {
     return visitRoot(ty);
@@ -555,6 +569,11 @@ TarjanResult Tarjan::findDirty(TypeId ty)
 TarjanResult Tarjan::findDirty(TypePackId tp)
 {
     return visitRoot(tp);
+}
+
+Substitution::Substitution(TypeArena* arena)
+    : Substitution(TxnLog::empty(), arena)
+{
 }
 
 Substitution::Substitution(const TxnLog* log_, TypeArena* arena)
@@ -657,7 +676,7 @@ void Substitution::resetState(const TxnLog* log, TypeArena* arena)
 
 TypeId Substitution::clone(TypeId ty)
 {
-    return shallowClone(ty, *arena, log, /* alwaysClone */ true);
+    return shallowClone(ty, *arena, log);
 }
 
 TypePackId Substitution::clone(TypePackId tp)
@@ -819,21 +838,21 @@ void Substitution::replaceChildren(TypeId ty)
         for (TypePackId& a : tfit->packArguments)
             a = replace(a);
     }
-    else if (ClassType* ctv = getMutable<ClassType>(ty))
+    else if (ExternType* etv = getMutable<ExternType>(ty))
     {
-        for (auto& [name, prop] : ctv->props)
+        for (auto& [name, prop] : etv->props)
             prop.setType(replace(prop.type()));
 
-        if (ctv->parent)
-            ctv->parent = replace(*ctv->parent);
+        if (etv->parent)
+            etv->parent = replace(*etv->parent);
 
-        if (ctv->metatable)
-            ctv->metatable = replace(*ctv->metatable);
+        if (etv->metatable)
+            etv->metatable = replace(*etv->metatable);
 
-        if (ctv->indexer)
+        if (etv->indexer)
         {
-            ctv->indexer->indexType = replace(ctv->indexer->indexType);
-            ctv->indexer->indexResultType = replace(ctv->indexer->indexResultType);
+            etv->indexer->indexType = replace(etv->indexer->indexType);
+            etv->indexer->indexResultType = replace(etv->indexer->indexResultType);
         }
     }
     else if (NegationType* ntv = getMutable<NegationType>(ty))
@@ -871,6 +890,15 @@ void Substitution::replaceChildren(TypePackId tp)
         for (TypePackId& t : tfitp->packArguments)
             t = replace(t);
     }
+}
+
+template<typename Ty>
+std::optional<Ty> Substitution::replace(std::optional<Ty> ty)
+{
+    if (ty)
+        return replace(*ty);
+    else
+        return std::nullopt;
 }
 
 } // namespace Luau

@@ -32,17 +32,20 @@ LUAU_FASTINTVARIABLE(LuauVisitRecursionLimit, 500)
 LUAU_FASTFLAG(LuauKnowsTheDataModel3)
 LUAU_FASTFLAGVARIABLE(DebugLuauFreezeDuringUnification)
 LUAU_FASTFLAG(LuauInstantiateInSubtyping)
-LUAU_FASTFLAG(LuauPreserveUnionIntersectionNodeForLeadingTokenSingleType)
 LUAU_FASTFLAG(LuauFreeTypesMustHaveBounds)
+LUAU_FASTFLAG(LuauStoreReturnTypesAsPackOnAst)
+
 LUAU_FASTFLAG(LuauRetainDefinitionAliasLocations)
 LUAU_FASTFLAGVARIABLE(LuauStatForInFix)
+LUAU_FASTFLAGVARIABLE(LuauReduceCheckBinaryExprStackPressure)
+LUAU_FASTFLAGVARIABLE(LuauLimitIterationWhenCheckingArgumentCounts)
 
 namespace Luau
 {
 
 static bool typeCouldHaveMetatable(TypeId ty)
 {
-    return get<TableType>(follow(ty)) || get<ClassType>(follow(ty)) || get<MetatableType>(follow(ty));
+    return get<TableType>(follow(ty)) || get<ExternType>(follow(ty)) || get<MetatableType>(follow(ty));
 }
 
 static void defaultLuauPrintLine(const std::string& s)
@@ -316,7 +319,7 @@ ModulePtr TypeChecker::checkWithoutRecursionCheck(const SourceModule& module, Mo
     unifierState.skipCacheForType.clear();
 
     duplicateTypeAliases.clear();
-    incorrectClassDefinitions.clear();
+    incorrectExternTypeDefinitions.clear();
 
     return std::move(currentModule);
 }
@@ -381,7 +384,7 @@ ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStat& program)
     }
     else if (auto global = program.as<AstStatDeclareFunction>())
         return check(scope, *global);
-    else if (auto global = program.as<AstStatDeclareClass>())
+    else if (auto global = program.as<AstStatDeclareExternType>())
         return check(scope, *global);
     else if (auto errorStatement = program.as<AstStatError>())
     {
@@ -496,9 +499,9 @@ ControlFlow TypeChecker::checkBlockWithoutRecursionCheck(const ScopePtr& scope, 
             prototype(scope, *typealias, subLevel);
             ++subLevel;
         }
-        else if (const auto& declaredClass = stat->as<AstStatDeclareClass>())
+        else if (const auto& declaredExternType = stat->as<AstStatDeclareExternType>())
         {
-            prototype(scope, *declaredClass);
+            prototype(scope, *declaredExternType);
         }
     }
 
@@ -786,7 +789,7 @@ struct Demoter : Substitution
 
     bool ignoreChildren(TypeId ty) override
     {
-        if (get<ClassType>(ty))
+        if (get<ExternType>(ty))
             return true;
 
         return false;
@@ -1684,82 +1687,82 @@ void TypeChecker::prototype(const ScopePtr& scope, const AstStatTypeAlias& typea
     }
 }
 
-void TypeChecker::prototype(const ScopePtr& scope, const AstStatDeclareClass& declaredClass)
+void TypeChecker::prototype(const ScopePtr& scope, const AstStatDeclareExternType& declaredExternType)
 {
-    std::optional<TypeId> superTy = std::make_optional(builtinTypes->classType);
-    if (declaredClass.superName)
+    std::optional<TypeId> superTy = std::make_optional(builtinTypes->externType);
+    if (declaredExternType.superName)
     {
-        Name superName = Name(declaredClass.superName->value);
+        Name superName = Name(declaredExternType.superName->value);
         std::optional<TypeFun> lookupType = scope->lookupType(superName);
 
         if (!lookupType)
         {
-            reportError(declaredClass.location, UnknownSymbol{superName, UnknownSymbol::Type});
-            incorrectClassDefinitions.insert(&declaredClass);
+            reportError(declaredExternType.location, UnknownSymbol{superName, UnknownSymbol::Type});
+            incorrectExternTypeDefinitions.insert(&declaredExternType);
             return;
         }
 
-        // We don't have generic classes, so this assertion _should_ never be hit.
+        // We don't have generic extern types, so this assertion _should_ never be hit.
         LUAU_ASSERT(lookupType->typeParams.size() == 0 && lookupType->typePackParams.size() == 0);
         superTy = lookupType->type;
 
-        if (!get<ClassType>(follow(*superTy)))
+        if (!get<ExternType>(follow(*superTy)))
         {
             reportError(
-                declaredClass.location,
-                GenericError{format("Cannot use non-class type '%s' as a superclass of class '%s'", superName.c_str(), declaredClass.name.value)}
+                declaredExternType.location,
+                GenericError{format("Cannot use non-class type '%s' as a superclass of class '%s'", superName.c_str(), declaredExternType.name.value)}
             );
-            incorrectClassDefinitions.insert(&declaredClass);
+            incorrectExternTypeDefinitions.insert(&declaredExternType);
             return;
         }
     }
 
-    Name className(declaredClass.name.value);
+    Name className(declaredExternType.name.value);
 
-    TypeId classTy = addType(ClassType(className, {}, superTy, std::nullopt, {}, {}, currentModule->name, declaredClass.location));
-    ClassType* ctv = getMutable<ClassType>(classTy);
+    TypeId classTy = addType(ExternType(className, {}, superTy, std::nullopt, {}, {}, currentModule->name, declaredExternType.location));
+    ExternType* etv = getMutable<ExternType>(classTy);
     TypeId metaTy = addType(TableType{TableState::Sealed, scope->level});
 
-    ctv->metatable = metaTy;
+    etv->metatable = metaTy;
     if (FFlag::LuauRetainDefinitionAliasLocations)
-        scope->exportedTypeBindings[className] = TypeFun{{}, classTy, declaredClass.location};
+        scope->exportedTypeBindings[className] = TypeFun{{}, classTy, declaredExternType.location};
     else
         scope->exportedTypeBindings[className] = TypeFun{{}, classTy};
 }
 
-ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStatDeclareClass& declaredClass)
+ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStatDeclareExternType& declaredExternType)
 {
-    Name className(declaredClass.name.value);
+    Name className(declaredExternType.name.value);
 
     // Don't bother checking if the class definition was incorrect
-    if (incorrectClassDefinitions.find(&declaredClass))
+    if (incorrectExternTypeDefinitions.find(&declaredExternType))
         return ControlFlow::None;
 
     std::optional<TypeFun> binding;
     if (auto it = scope->exportedTypeBindings.find(className); it != scope->exportedTypeBindings.end())
         binding = it->second;
 
-    // This class definition must have been `prototype()`d first.
+    // This extern type definition must have been `prototype()`d first.
     if (!binding)
-        ice("Class not predeclared");
+        ice("Extern type not predeclared");
 
-    TypeId classTy = binding->type;
-    ClassType* ctv = getMutable<ClassType>(classTy);
+    TypeId externTy = binding->type;
+    ExternType* etv = getMutable<ExternType>(externTy);
 
-    if (!ctv->metatable)
-        ice("No metatable for declared class");
+    if (!etv->metatable)
+        ice("No metatable for declared extern type");
 
-    if (const auto& indexer = declaredClass.indexer)
-        ctv->indexer = TableIndexer(resolveType(scope, *indexer->indexType), resolveType(scope, *indexer->resultType));
+    if (const auto& indexer = declaredExternType.indexer)
+        etv->indexer = TableIndexer(resolveType(scope, *indexer->indexType), resolveType(scope, *indexer->resultType));
 
-    TableType* metatable = getMutable<TableType>(*ctv->metatable);
-    for (const AstDeclaredClassProp& prop : declaredClass.props)
+    TableType* metatable = getMutable<TableType>(*etv->metatable);
+    for (const AstDeclaredExternTypeProperty& prop : declaredExternType.props)
     {
         Name propName(prop.name.value);
         TypeId propTy = resolveType(scope, *prop.ty);
 
         bool assignToMetatable = isMetamethod(propName);
-        Luau::ClassType::Props& assignTo = assignToMetatable ? metatable->props : ctv->props;
+        Luau::ExternType::Props& assignTo = assignToMetatable ? metatable->props : etv->props;
 
         // Function types always take 'self', but this isn't reflected in the
         // parsed annotation. Add it here.
@@ -1768,7 +1771,7 @@ ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStatDeclareClass&
             if (FunctionType* ftv = getMutable<FunctionType>(propTy))
             {
                 ftv->argNames.insert(ftv->argNames.begin(), FunctionArgument{"self", {}});
-                ftv->argTypes = addTypePack(TypePack{{classTy}, ftv->argTypes});
+                ftv->argTypes = addTypePack(TypePack{{externTy}, ftv->argTypes});
                 ftv->hasSelf = true;
 
                 FunctionDefinition defn;
@@ -1811,7 +1814,7 @@ ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStatDeclareClass&
             }
             else
             {
-                reportError(declaredClass.location, GenericError{format("Cannot overload non-function class member '%s'", propName.c_str())});
+                reportError(declaredExternType.location, GenericError{format("Cannot overload non-function class member '%s'", propName.c_str())});
             }
         }
     }
@@ -1850,7 +1853,8 @@ ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStatDeclareFuncti
     );
 
     TypePackId argPack = resolveTypePack(funScope, global.params);
-    TypePackId retPack = resolveTypePack(funScope, global.retTypes);
+    TypePackId retPack =
+        FFlag::LuauStoreReturnTypesAsPackOnAst ? resolveTypePack(funScope, *global.retTypes) : resolveTypePack(funScope, global.retTypes_DEPRECATED);
 
     FunctionDefinition defn;
 
@@ -1924,7 +1928,7 @@ WithPredicate<TypeId> TypeChecker::checkExpr(const ScopePtr& scope, const AstExp
     else if (auto a = expr.as<AstExprUnary>())
         result = checkExpr(scope, *a);
     else if (auto a = expr.as<AstExprBinary>())
-        result = checkExpr(scope, *a, expectedType);
+        result = FFlag::LuauReduceCheckBinaryExprStackPressure ? checkExpr(scope, *a, expectedType) : checkExpr_DEPRECATED(scope, *a, expectedType);
     else if (auto a = expr.as<AstExprTypeAssertion>())
         result = checkExpr(scope, *a);
     else if (auto a = expr.as<AstExprError>())
@@ -2135,9 +2139,9 @@ std::optional<TypeId> TypeChecker::getIndexTypeFromTypeImpl(
         if (auto found = findTablePropertyRespectingMeta(type, name, location, addErrors))
             return *found;
     }
-    else if (const ClassType* cls = get<ClassType>(type))
+    else if (const ExternType* cls = get<ExternType>(type))
     {
-        const Property* prop = lookupClassProp(cls, name);
+        const Property* prop = lookupExternTypeProp(cls, name);
         if (prop)
             return prop->type();
 
@@ -3187,19 +3191,81 @@ WithPredicate<TypeId> TypeChecker::checkExpr(const ScopePtr& scope, const AstExp
     }
     else if (expr.op == AstExprBinary::CompareEq || expr.op == AstExprBinary::CompareNe)
     {
+        // Defer the stack allocation of lhs, predicate etc until this lambda is called.
+        auto checkExprOr = [&]() -> WithPredicate<TypeId>
+        {
+            // For these, passing expectedType is worse than simply forcing them, because their implementation
+            // may inadvertently check if expectedTypes exist first and use it, instead of forceSingleton first.
+            WithPredicate<TypeId> lhs = checkExpr(scope, *expr.left, std::nullopt, /*forceSingleton=*/true);
+            WithPredicate<TypeId> rhs = checkExpr(scope, *expr.right, std::nullopt, /*forceSingleton=*/true);
+
+            if (auto predicate = tryGetTypeGuardPredicate(expr))
+                return {booleanType, {std::move(*predicate)}};
+
+            PredicateVec predicates;
+
+            if (auto lvalue = tryGetLValue(*expr.left))
+                predicates.emplace_back(EqPredicate{std::move(*lvalue), rhs.type, expr.location});
+
+            if (auto lvalue = tryGetLValue(*expr.right))
+                predicates.emplace_back(EqPredicate{std::move(*lvalue), lhs.type, expr.location});
+
+            if (!predicates.empty() && expr.op == AstExprBinary::CompareNe)
+                predicates = {NotPredicate{std::move(predicates)}};
+
+            return {checkBinaryOperation(scope, expr, lhs.type, rhs.type), std::move(predicates)};
+        };
+        return checkExprOr();
+    }
+    else
+    {
+        // Expected types are not useful for other binary operators.
+        WithPredicate<TypeId> lhs = checkExpr(scope, *expr.left);
+        WithPredicate<TypeId> rhs = checkExpr(scope, *expr.right);
+
+        // Intentionally discarding predicates with other operators.
+        return WithPredicate{checkBinaryOperation(scope, expr, lhs.type, rhs.type, lhs.predicates)};
+    }
+}
+
+WithPredicate<TypeId> TypeChecker::checkExpr_DEPRECATED(const ScopePtr& scope, const AstExprBinary& expr, std::optional<TypeId> expectedType)
+{
+    if (expr.op == AstExprBinary::And)
+    {
+        auto [lhsTy, lhsPredicates] = checkExpr(scope, *expr.left, expectedType);
+
+        ScopePtr innerScope = childScope(scope, expr.location);
+        resolve(lhsPredicates, innerScope, true);
+
+        auto [rhsTy, rhsPredicates] = checkExpr(innerScope, *expr.right, expectedType);
+
+        return {checkBinaryOperation(scope, expr, lhsTy, rhsTy), {AndPredicate{std::move(lhsPredicates), std::move(rhsPredicates)}}};
+    }
+    else if (expr.op == AstExprBinary::Or)
+    {
+        auto [lhsTy, lhsPredicates] = checkExpr(scope, *expr.left, expectedType);
+
+        ScopePtr innerScope = childScope(scope, expr.location);
+        resolve(lhsPredicates, innerScope, false);
+
+        auto [rhsTy, rhsPredicates] = checkExpr(innerScope, *expr.right, expectedType);
+
+        // Because of C++, I'm not sure if lhsPredicates was not moved out by the time we call checkBinaryOperation.
+        TypeId result = checkBinaryOperation(scope, expr, lhsTy, rhsTy, lhsPredicates);
+        return {result, {OrPredicate{std::move(lhsPredicates), std::move(rhsPredicates)}}};
+    }
+    else if (expr.op == AstExprBinary::CompareEq || expr.op == AstExprBinary::CompareNe)
+    {
         // For these, passing expectedType is worse than simply forcing them, because their implementation
         // may inadvertently check if expectedTypes exist first and use it, instead of forceSingleton first.
         WithPredicate<TypeId> lhs = checkExpr(scope, *expr.left, std::nullopt, /*forceSingleton=*/true);
         WithPredicate<TypeId> rhs = checkExpr(scope, *expr.right, std::nullopt, /*forceSingleton=*/true);
-
         if (auto predicate = tryGetTypeGuardPredicate(expr))
             return {booleanType, {std::move(*predicate)}};
 
         PredicateVec predicates;
-
         if (auto lvalue = tryGetLValue(*expr.left))
             predicates.push_back(EqPredicate{std::move(*lvalue), rhs.type, expr.location});
-
         if (auto lvalue = tryGetLValue(*expr.right))
             predicates.push_back(EqPredicate{std::move(*lvalue), lhs.type, expr.location});
 
@@ -3398,14 +3464,14 @@ TypeId TypeChecker::checkLValueBinding(const ScopePtr& scope, const AstExprIndex
             return errorRecoveryType(scope);
         }
     }
-    else if (const ClassType* lhsClass = get<ClassType>(lhs))
+    else if (const ExternType* lhsExternType = get<ExternType>(lhs))
     {
-        if (const Property* prop = lookupClassProp(lhsClass, name))
+        if (const Property* prop = lookupExternTypeProp(lhsExternType, name))
         {
             return prop->type();
         }
 
-        if (auto indexer = lhsClass->indexer)
+        if (auto indexer = lhsExternType->indexer)
         {
             Unifier state = mkUnifier(scope, expr.location);
             state.tryUnify(stringType, indexer->indexType);
@@ -3457,14 +3523,14 @@ TypeId TypeChecker::checkLValueBinding(const ScopePtr& scope, const AstExprIndex
 
     if (value)
     {
-        if (const ClassType* exprClass = get<ClassType>(exprType))
+        if (const ExternType* exprExternType = get<ExternType>(exprType))
         {
-            if (const Property* prop = lookupClassProp(exprClass, value->value.data))
+            if (const Property* prop = lookupExternTypeProp(exprExternType, value->value.data))
             {
                 return prop->type();
             }
 
-            if (auto indexer = exprClass->indexer)
+            if (auto indexer = exprExternType->indexer)
             {
                 unify(stringType, indexer->indexType, scope, expr.index->location);
                 return indexer->indexResultType;
@@ -3490,20 +3556,20 @@ TypeId TypeChecker::checkLValueBinding(const ScopePtr& scope, const AstExprIndex
     }
     else
     {
-        if (const ClassType* exprClass = get<ClassType>(exprType))
+        if (const ExternType* exprExternType = get<ExternType>(exprType))
         {
-            if (auto indexer = exprClass->indexer)
+            if (auto indexer = exprExternType->indexer)
             {
                 unify(indexType, indexer->indexType, scope, expr.index->location);
                 return indexer->indexResultType;
             }
         }
 
-        if (const ClassType* exprClass = get<ClassType>(exprType))
+        if (const ExternType* exprExternType = get<ExternType>(exprType))
         {
             if (isNonstrictMode())
                 return unknownType;
-            reportError(TypeError{expr.location, DynamicPropertyLookupOnClassesUnsafe{exprType}});
+            reportError(TypeError{expr.location, DynamicPropertyLookupOnExternTypesUnsafe{exprType}});
             return errorRecoveryType(scope);
         }
     }
@@ -3784,8 +3850,10 @@ std::pair<TypeId, ScopePtr> TypeChecker::checkFunctionSignature(
     auto [generics, genericPacks] = createGenericTypes(funScope, std::nullopt, expr, expr.generics, expr.genericPacks);
 
     TypePackId retPack;
-    if (expr.returnAnnotation)
+    if (FFlag::LuauStoreReturnTypesAsPackOnAst && expr.returnAnnotation)
         retPack = resolveTypePack(funScope, *expr.returnAnnotation);
+    else if (!FFlag::LuauStoreReturnTypesAsPackOnAst && expr.returnAnnotation_DEPRECATED)
+        retPack = resolveTypePack(funScope, *expr.returnAnnotation_DEPRECATED);
     else if (isNonstrictMode())
         retPack = anyTypePack;
     else if (expectedFunctionType && expectedFunctionType->generics.empty() && expectedFunctionType->genericPacks.empty())
@@ -3992,7 +4060,8 @@ void TypeChecker::checkFunctionBody(const ScopePtr& scope, TypeId ty, const AstE
             // If we're in nonstrict mode we want to only report this missing return
             // statement if there are type annotations on the function. In strict mode
             // we report it regardless.
-            if (!isNonstrictMode() || function.returnAnnotation)
+            if (!isNonstrictMode() ||
+                (FFlag::LuauStoreReturnTypesAsPackOnAst ? function.returnAnnotation != nullptr : function.returnAnnotation_DEPRECATED.has_value()))
             {
                 reportError(getEndLocation(function), FunctionExitsWithoutReturning{funTy->retTypes});
             }
@@ -4049,6 +4118,23 @@ void TypeChecker::checkArgumentList(
     TypePackIterator endIter = end(argPack); // Important subtlety: All end TypePackIterators are equivalent
 
     size_t paramIndex = 0;
+
+    int loopCount = 0;
+    auto exceedsLoopCount = [&]()
+    {
+        if (FFlag::LuauLimitIterationWhenCheckingArgumentCounts)
+        {
+            ++loopCount;
+            if (loopCount > FInt::LuauTypeInferTypePackLoopLimit)
+            {
+                state.reportError(TypeError{state.location, CodeTooComplex{}});
+                reportErrorCodeTooComplex(state.location);
+                return true;
+            }
+        }
+
+        return false;
+    };
 
     auto reportCountMismatchError = [&state, &argLocations, paramPack, argPack, &funName]()
     {
@@ -4124,12 +4210,17 @@ void TypeChecker::checkArgumentList(
                 }
                 else if (auto vtp = state.log.getMutable<VariadicTypePack>(tail))
                 {
+                    loopCount = 0;
+
                     // Function is variadic and requires that all subsequent parameters
                     // be compatible with a type.
                     while (paramIter != endIter)
                     {
                         state.tryUnify(vtp->ty, *paramIter);
                         ++paramIter;
+
+                        if (exceedsLoopCount())
+                            return;
                     }
 
                     return;
@@ -4138,10 +4229,16 @@ void TypeChecker::checkArgumentList(
                 {
                     std::vector<TypeId> rest;
                     rest.reserve(std::distance(paramIter, endIter));
+
+                    loopCount = 0;
+
                     while (paramIter != endIter)
                     {
                         rest.push_back(*paramIter);
                         ++paramIter;
+
+                        if (exceedsLoopCount())
+                            return;
                     }
 
                     TypePackId varPack = addTypePack(TypePackVar{TypePack{rest, paramIter.tail()}});
@@ -4185,12 +4282,17 @@ void TypeChecker::checkArgumentList(
             // too many parameters passed
             if (!paramIter.tail())
             {
+                loopCount = 0;
+
                 while (argIter != endIter)
                 {
                     // The use of unify here is deliberate. We don't want this unification
                     // to be undoable.
                     unify(errorRecoveryType(scope), *argIter, scope, state.location);
                     ++argIter;
+
+                    if (exceedsLoopCount())
+                        return;
                 }
                 reportCountMismatchError();
                 return;
@@ -4204,6 +4306,8 @@ void TypeChecker::checkArgumentList(
             }
             else if (auto vtp = state.log.getMutable<VariadicTypePack>(tail))
             {
+                loopCount = 0;
+
                 // Function is variadic and requires that all subsequent parameters
                 // be compatible with a type.
                 size_t argIndex = paramIndex;
@@ -4219,12 +4323,17 @@ void TypeChecker::checkArgumentList(
 
                     ++argIter;
                     ++argIndex;
+
+                    if (exceedsLoopCount())
+                        return;
                 }
 
                 return;
             }
             else if (state.log.getMutable<FreeTypePack>(tail))
             {
+                loopCount = 0;
+
                 // Create a type pack out of the remaining argument types
                 // and unify it with the tail.
                 std::vector<TypeId> rest;
@@ -4233,7 +4342,10 @@ void TypeChecker::checkArgumentList(
                 {
                     rest.push_back(*argIter);
                     ++argIter;
-                }
+
+                    if (exceedsLoopCount())
+                        return;
+        }
 
                 TypePackId varPack = addTypePack(TypePackVar{TypePack{rest, argIter.tail()}});
                 state.tryUnify(varPack, tail);
@@ -4504,9 +4616,9 @@ std::unique_ptr<WithPredicate<TypePackId>> TypeChecker::checkCallOverload(
     {
         callTy = getIndexTypeFromType(scope, mttv->metatable, "__call", expr.func->location, /* addErrors= */ false);
     }
-    else if (const ClassType* ctv = get<ClassType>(fn); ctv && ctv->metatable)
+    else if (const ExternType* etv = get<ExternType>(fn); etv && etv->metatable)
     {
-        callTy = getIndexTypeFromType(scope, *ctv->metatable, "__call", expr.func->location, /* addErrors= */ false);
+        callTy = getIndexTypeFromType(scope, *etv->metatable, "__call", expr.func->location, /* addErrors= */ false);
     }
 
     if (callTy)
@@ -5209,17 +5321,17 @@ void TypeChecker::diagnoseMissingTableKey(UnknownProperty* utk, TypeErrorData& d
 
     if (auto ttv = getTableType(utk->table))
         accumulate(ttv->props);
-    else if (auto ctv = get<ClassType>(follow(utk->table)))
+    else if (auto etv = get<ExternType>(follow(utk->table)))
     {
-        while (ctv)
+        while (etv)
         {
-            accumulate(ctv->props);
+            accumulate(etv->props);
 
-            if (!ctv->parent)
+            if (!etv->parent)
                 break;
 
-            ctv = get<ClassType>(*ctv->parent);
-            LUAU_ASSERT(ctv);
+            etv = get<ExternType>(*etv->parent);
+            LUAU_ASSERT(etv);
         }
     }
 
@@ -5696,7 +5808,8 @@ TypeId TypeChecker::resolveTypeWorker(const ScopePtr& scope, const AstType& anno
         auto [generics, genericPacks] = createGenericTypes(funcScope, std::nullopt, annotation, func->generics, func->genericPacks);
 
         TypePackId argTypes = resolveTypePack(funcScope, func->argTypes);
-        TypePackId retTypes = resolveTypePack(funcScope, func->returnTypes);
+        TypePackId retTypes = FFlag::LuauStoreReturnTypesAsPackOnAst ? resolveTypePack(funcScope, *func->returnTypes)
+                                                                     : resolveTypePack(funcScope, func->returnTypes_DEPRECATED);
 
         std::vector<TypeId> genericTys;
         genericTys.reserve(generics.size());
@@ -5748,12 +5861,8 @@ TypeId TypeChecker::resolveTypeWorker(const ScopePtr& scope, const AstType& anno
     }
     else if (const auto& un = annotation.as<AstTypeUnion>())
     {
-        if (FFlag::LuauPreserveUnionIntersectionNodeForLeadingTokenSingleType)
-        {
-            if (un->types.size == 1)
-                return resolveType(scope, *un->types.data[0]);
-        }
-
+        if (un->types.size == 1)
+            return resolveType(scope, *un->types.data[0]);
         std::vector<TypeId> types;
         for (AstType* ann : un->types)
             types.push_back(resolveType(scope, *ann));
@@ -5762,12 +5871,8 @@ TypeId TypeChecker::resolveTypeWorker(const ScopePtr& scope, const AstType& anno
     }
     else if (const auto& un = annotation.as<AstTypeIntersection>())
     {
-        if (FFlag::LuauPreserveUnionIntersectionNodeForLeadingTokenSingleType)
-        {
-            if (un->types.size == 1)
-                return resolveType(scope, *un->types.data[0]);
-        }
-
+        if (un->types.size == 1)
+            return resolveType(scope, *un->types.data[0]);
         std::vector<TypeId> types;
         for (AstType* ann : un->types)
             types.push_back(resolveType(scope, *ann));
@@ -6374,7 +6479,7 @@ void TypeChecker::resolve(const TypeGuardPredicate& typeguardP, RefinementMap& r
         return refine(
             [](TypeId ty) -> bool
             {
-                return get<ClassType>(ty);
+                return get<ExternType>(ty);
             }
         );
     }
@@ -6389,13 +6494,13 @@ void TypeChecker::resolve(const TypeGuardPredicate& typeguardP, RefinementMap& r
     TypeId type = follow(typeFun->type);
 
     // You cannot refine to the top class type.
-    if (type == builtinTypes->classType)
+    if (type == builtinTypes->externType)
     {
         return addRefinement(refis, typeguardP.lvalue, errorRecoveryType(scope));
     }
 
-    // We're only interested in the root class of any classes.
-    if (auto ctv = get<ClassType>(type); !ctv || (ctv->parent != builtinTypes->classType && !hasTag(type, kTypeofRootTag)))
+    // We're only interested in the root type of any extern type.
+    if (auto etv = get<ExternType>(type); !etv || (etv->parent != builtinTypes->externType && !hasTag(type, kTypeofRootTag)))
         return addRefinement(refis, typeguardP.lvalue, errorRecoveryType(scope));
 
     // This probably hints at breaking out type filtering functions from the predicate solver so that typeof is not tightly coupled with IsA.

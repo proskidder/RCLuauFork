@@ -40,13 +40,13 @@ LUAU_FASTFLAG(LuauInferInNoCheckMode)
 LUAU_FASTFLAGVARIABLE(LuauKnowsTheDataModel3)
 LUAU_FASTFLAG(LuauSolverV2)
 LUAU_DYNAMIC_FASTFLAGVARIABLE(LuauRethrowKnownExceptions, false)
+LUAU_FASTFLAG(DebugLuauGreedyGeneralization)
 LUAU_FASTFLAGVARIABLE(DebugLuauLogSolverToJson)
 LUAU_FASTFLAGVARIABLE(DebugLuauLogSolverToJsonFile)
 LUAU_FASTFLAGVARIABLE(DebugLuauForbidInternalTypes)
 LUAU_FASTFLAGVARIABLE(DebugLuauForceStrictMode)
 LUAU_FASTFLAGVARIABLE(DebugLuauForceNonStrictMode)
 
-LUAU_FASTFLAGVARIABLE(LuauSelectivelyRetainDFGArena)
 LUAU_FASTFLAG(LuauTypeFunResultInAutocomplete)
 
 namespace Luau
@@ -129,9 +129,9 @@ static void generateDocumentationSymbols(TypeId ty, const std::string& rootName)
             prop.documentationSymbol = rootName + "." + name;
         }
     }
-    else if (ClassType* ctv = getMutable<ClassType>(ty))
+    else if (ExternType* etv = getMutable<ExternType>(ty))
     {
-        for (auto& [name, prop] : ctv->props)
+        for (auto& [name, prop] : etv->props)
         {
             prop.documentationSymbol = rootName + "." + name;
         }
@@ -1003,11 +1003,8 @@ void Frontend::checkBuildQueueItem(BuildQueueItem& item)
         freeze(module->interfaceTypes);
 
         module->internalTypes.clear();
-        if (FFlag::LuauSelectivelyRetainDFGArena)
-        {
-            module->defArena.allocator.clear();
-            module->keyArena.allocator.clear();
-        }
+        module->defArena.allocator.clear();
+        module->keyArena.allocator.clear();
 
         module->astTypes.clear();
         module->astTypePacks.clear();
@@ -1308,7 +1305,7 @@ ModulePtr check(
 
 struct InternalTypeFinder : TypeOnceVisitor
 {
-    bool visit(TypeId, const ClassType&) override
+    bool visit(TypeId, const ExternType&) override
     {
         return false;
     }
@@ -1423,30 +1420,59 @@ ModulePtr check(
         requireCycles
     };
 
-    cg.visitModuleRoot(sourceModule.root);
-    result->errors = std::move(cg.errors);
+    // FIXME: Delete this flag when clipping FFlag::DebugLuauGreedyGeneralization.
+    //
+    // This optional<> only exists so that we can run one constructor when the flag
+    // is set, and another when it is unset.
+    std::optional<ConstraintSolver> cs;
 
-    ConstraintSolver cs{
-        NotNull{&normalizer},
-        NotNull{simplifier.get()},
-        NotNull{&typeFunctionRuntime},
-        NotNull(cg.rootScope),
-        borrowConstraints(cg.constraints),
-        NotNull{&cg.scopeToFunction},
-        result->name,
-        moduleResolver,
-        requireCycles,
-        logger.get(),
-        NotNull{&dfg},
-        limits
-    };
+    if (FFlag::DebugLuauGreedyGeneralization)
+    {
+        ConstraintSet constraintSet = cg.run(sourceModule.root);
+        result->errors = std::move(constraintSet.errors);
+
+        cs.emplace(
+            NotNull{&normalizer},
+            NotNull{simplifier.get()},
+            NotNull{&typeFunctionRuntime},
+            result->name,
+            moduleResolver,
+            requireCycles,
+            logger.get(),
+            NotNull{&dfg},
+            limits,
+            std::move(constraintSet)
+        );
+    }
+    else
+    {
+        cg.visitModuleRoot(sourceModule.root);
+        result->errors = std::move(cg.errors);
+
+        cs.emplace(
+            NotNull{&normalizer},
+            NotNull{simplifier.get()},
+            NotNull{&typeFunctionRuntime},
+            NotNull(cg.rootScope),
+            borrowConstraints(cg.constraints),
+            NotNull{&cg.scopeToFunction},
+            result->name,
+            moduleResolver,
+            requireCycles,
+            logger.get(),
+            NotNull{&dfg},
+            limits
+        );
+    }
+
+    LUAU_ASSERT(bool(cs));
 
     if (options.randomizeConstraintResolutionSeed)
-        cs.randomize(*options.randomizeConstraintResolutionSeed);
+        cs->randomize(*options.randomizeConstraintResolutionSeed);
 
     try
     {
-        cs.run();
+        cs->run();
     }
     catch (const TimeLimitError&)
     {
@@ -1466,12 +1492,12 @@ ModulePtr check(
             printf("%s\n", output.c_str());
     }
 
-    for (TypeError& e : cs.errors)
+    for (TypeError& e : cs->errors)
         result->errors.emplace_back(std::move(e));
 
     result->scopes = std::move(cg.scopes);
     result->type = sourceModule.type;
-    result->upperBoundContributors = std::move(cs.upperBoundContributors);
+    result->upperBoundContributors = std::move(cs->upperBoundContributors);
 
     if (result->timeout || result->cancelled)
     {

@@ -48,7 +48,8 @@ LUAU_DYNAMIC_FASTINTVARIABLE(LuauTypeFamilyUseGuesserDepth, -1);
 
 LUAU_FASTFLAG(DebugLuauEqSatSimplification)
 LUAU_FASTFLAG(LuauTypeFunResultInAutocomplete)
-LUAU_FASTFLAG(LuauNonReentrantGeneralization)
+LUAU_FASTFLAG(LuauNonReentrantGeneralization2)
+LUAU_FASTFLAG(DebugLuauGreedyGeneralization)
 
 LUAU_FASTFLAGVARIABLE(DebugLuauLogTypeFamilies)
 LUAU_FASTFLAGVARIABLE(LuauMetatableTypeFunctions)
@@ -57,14 +58,15 @@ LUAU_FASTFLAGVARIABLE(LuauIndexTypeFunctionFunctionMetamethods)
 LUAU_FASTFLAGVARIABLE(LuauIntersectNotNil)
 LUAU_FASTFLAGVARIABLE(LuauSkipNoRefineDuringRefinement)
 LUAU_FASTFLAGVARIABLE(LuauMetatablesHaveLength)
-LUAU_FASTFLAGVARIABLE(LuauDontForgetToReduceUnionFunc)
-LUAU_FASTFLAGVARIABLE(LuauSearchForRefineableType)
 LUAU_FASTFLAGVARIABLE(LuauIndexAnyIsAny)
 LUAU_FASTFLAGVARIABLE(LuauFixCyclicIndexInIndexer)
 LUAU_FASTFLAGVARIABLE(LuauSimplyRefineNotNil)
 LUAU_FASTFLAGVARIABLE(LuauIndexDeferPendingIndexee)
 LUAU_FASTFLAGVARIABLE(LuauNewTypeFunReductionChecks2)
 LUAU_FASTFLAGVARIABLE(LuauReduceUnionFollowUnionType)
+LUAU_FASTFLAG(LuauOptimizeFalsyAndTruthyIntersect)
+LUAU_FASTFLAGVARIABLE(LuauNarrowIntersectionNevers)
+LUAU_FASTFLAGVARIABLE(LuauRefineWaitForBlockedTypesInTarget)
 
 namespace Luau
 {
@@ -103,7 +105,7 @@ struct InstanceCollector_DEPRECATED : TypeOnceVisitor
             cyclicInstance.push_back(t);
     }
 
-    bool visit(TypeId ty, const ClassType&) override
+    bool visit(TypeId ty, const ExternType&) override
     {
         return false;
     }
@@ -179,7 +181,7 @@ struct InstanceCollector : TypeOnceVisitor
         }
     }
 
-    bool visit(TypeId ty, const ClassType&) override
+    bool visit(TypeId ty, const ExternType&) override
     {
         return false;
     }
@@ -267,7 +269,7 @@ struct UnscopedGenericFinder : TypeOnceVisitor
         return false;
     }
 
-    bool visit(TypeId ty, const ClassType&) override
+    bool visit(TypeId ty, const ExternType&) override
     {
         return false;
     }
@@ -309,9 +311,22 @@ struct TypeFunctionReducer
 
     enum class SkipTestResult
     {
+        /// If a type function is cyclic, it cannot be reduced, but maybe we can
+        /// make a guess and offer a suggested annotation to the user.
         CyclicTypeFunction,
+
+        /// Indicase that we will not be able to reduce this type function this
+        /// time. Constraint resolution may cause this type function to become
+        /// reducible later.
         Irreducible,
+
+        /// Some type functions can operate on generic parameters
+        Generic,
+
+        /// We might be able to reduce this type function, but not yet.
         Defer,
+
+        /// We can attempt to reduce this type function right now.
         Okay,
     };
 
@@ -334,7 +349,10 @@ struct TypeFunctionReducer
         }
         else if (is<GenericType>(ty))
         {
-            return SkipTestResult::Irreducible;
+            if (FFlag::DebugLuauGreedyGeneralization)
+                return SkipTestResult::Generic;
+            else
+                return SkipTestResult::Irreducible;
         }
 
         return SkipTestResult::Okay;
@@ -353,7 +371,10 @@ struct TypeFunctionReducer
         }
         else if (is<GenericTypePack>(ty))
         {
-            return SkipTestResult::Irreducible;
+            if (FFlag::DebugLuauGreedyGeneralization)
+                return SkipTestResult::Generic;
+            else
+                return SkipTestResult::Irreducible;
         }
 
         return SkipTestResult::Okay;
@@ -435,7 +456,7 @@ struct TypeFunctionReducer
         {
             SkipTestResult skip = testForSkippability(p);
 
-            if (skip == SkipTestResult::Irreducible)
+            if (skip == SkipTestResult::Irreducible || (skip == SkipTestResult::Generic && !tfit->function->canReduceGenerics))
             {
                 if (FFlag::DebugLuauLogTypeFamilies)
                     printf("%s is irreducible due to a dependency on %s\n", toString(subject, {true}).c_str(), toString(p, {true}).c_str());
@@ -461,7 +482,7 @@ struct TypeFunctionReducer
         {
             SkipTestResult skip = testForSkippability(p);
 
-            if (skip == SkipTestResult::Irreducible)
+            if (skip == SkipTestResult::Irreducible || (skip == SkipTestResult::Generic && !tfit->function->canReduceGenerics))
             {
                 if (FFlag::DebugLuauLogTypeFamilies)
                     printf("%s is irreducible due to a dependency on %s\n", toString(subject, {true}).c_str(), toString(p, {true}).c_str());
@@ -822,7 +843,7 @@ static std::optional<TypeFunctionReductionResult<TypeId>> tryDistributeTypeFunct
     {
         arguments[unionIndex] = option;
 
-        TypeFunctionReductionResult<TypeId> result = f(instance, arguments, packParams, ctx, args...);
+        TypeFunctionReductionResult<TypeId> result = f(instance, arguments, packParams, ctx, args...); // NOLINT
         blockedTypes.insert(blockedTypes.end(), result.blockedTypes.begin(), result.blockedTypes.end());
         if (result.reductionStatus != Reduction::MaybeOk)
             reductionStatus = result.reductionStatus;
@@ -847,7 +868,7 @@ static std::optional<TypeFunctionReductionResult<TypeId>> tryDistributeTypeFunct
             {},
         });
 
-        if (FFlag::LuauDontForgetToReduceUnionFunc && ctx->solver)
+        if (ctx->solver)
             ctx->pushConstraint(ReduceConstraint{resultTy});
 
         return {{resultTy, Reduction::MaybeOk, {}, {}}};
@@ -886,7 +907,7 @@ struct FindUserTypeFunctionBlockers : TypeOnceVisitor
         return true;
     }
 
-    bool visit(TypeId ty, const ClassType&) override
+    bool visit(TypeId ty, const ExternType&) override
     {
         return false;
     }
@@ -1221,7 +1242,7 @@ TypeFunctionReductionResult<TypeId> unmTypeFunction(
     if (isPending(operandTy, ctx->solver))
         return {std::nullopt, Reduction::MaybeOk, {operandTy}, {}};
 
-    if (FFlag::LuauNonReentrantGeneralization)
+    if (FFlag::LuauNonReentrantGeneralization2)
         operandTy = follow(operandTy);
 
     std::shared_ptr<const NormalizedType> normTy = ctx->normalizer->normalize(operandTy);
@@ -2108,7 +2129,7 @@ struct FindRefinementBlockers : TypeOnceVisitor
         return false;
     }
 
-    bool visit(TypeId ty, const ClassType&) override
+    bool visit(TypeId ty, const ExternType&) override
     {
         return false;
     }
@@ -2163,6 +2184,44 @@ struct ContainsRefinableType : TypeOnceVisitor
     }
 };
 
+namespace
+{
+bool isApproximateFalsy(TypeId ty)
+{
+    ty = follow(ty);
+    bool seenNil = false;
+    bool seenFalse = false;
+    if (auto ut = get<UnionType>(ty))
+    {
+        for (auto option : ut)
+        {
+            if (auto pt = get<PrimitiveType>(option); pt && pt->type == PrimitiveType::NilType)
+                seenNil = true;
+            else if (auto st = get<SingletonType>(option); st && st->variant == BooleanSingleton{false})
+                seenFalse = true;
+            else
+                return false;
+        }
+    }
+    return seenFalse && seenNil;
+}
+
+bool isApproximateTruthy(TypeId ty)
+{
+    ty = follow(ty);
+    if (auto nt = get<NegationType>(ty))
+        return isApproximateFalsy(nt->ty);
+    return false;
+}
+
+bool isSimpleDiscriminant(TypeId ty)
+{
+    ty = follow(ty);
+    return isApproximateTruthy(ty) || isApproximateFalsy(ty);
+}
+
+}
+
 TypeFunctionReductionResult<TypeId> refineTypeFunction(
     TypeId instance,
     const std::vector<TypeId>& typeParams,
@@ -2192,6 +2251,18 @@ TypeFunctionReductionResult<TypeId> refineTypeFunction(
                 return {std::nullopt, Reduction::MaybeOk, {t}, {}};
         }
     }
+
+    if (FFlag::LuauRefineWaitForBlockedTypesInTarget)
+    {
+        // If we have a blocked type in the target, we *could* potentially
+        // refine it, but more likely we end up with some type explosion in
+        // normalization.
+        FindRefinementBlockers frb;
+        frb.traverse(targetTy);
+        if (!frb.found.empty())
+            return {std::nullopt, Reduction::MaybeOk, {frb.found.begin(), frb.found.end()}, {}};
+    }
+
     // Refine a target type and a discriminant one at a time.
     // Returns result : TypeId, toBlockOn : vector<TypeId>
     auto stepRefine = [&ctx](TypeId target, TypeId discriminant) -> std::pair<TypeId, std::vector<TypeId>>
@@ -2222,28 +2293,14 @@ TypeFunctionReductionResult<TypeId> refineTypeFunction(
         }
         else
         {
-            if (FFlag::LuauSearchForRefineableType)
-            {
-                // If the discriminant type is only:
-                // - The `*no-refine*` type or,
-                // - tables, metatables, unions, intersections, functions, or negations _containing_ `*no-refine*`.
-                // There's no point in refining against it.
-                ContainsRefinableType crt;
-                crt.traverse(discriminant);
-                if (!crt.found)
-                    return {target, {}};
-            }
-            else
-            {
-                if (FFlag::LuauSkipNoRefineDuringRefinement)
-                    if (get<NoRefineType>(discriminant))
-                        return {target, {}};
-                if (auto nt = get<NegationType>(discriminant))
-                {
-                    if (get<NoRefineType>(follow(nt->ty)))
-                        return {target, {}};
-                }
-            }
+            // If the discriminant type is only:
+            // - The `*no-refine*` type or,
+            // - tables, metatables, unions, intersections, functions, or negations _containing_ `*no-refine*`.
+            // There's no point in refining against it.
+            ContainsRefinableType crt;
+            crt.traverse(discriminant);
+            if (!crt.found)
+                return {target, {}};
 
             if (FFlag::LuauSimplyRefineNotNil)
             {
@@ -2257,16 +2314,37 @@ TypeFunctionReductionResult<TypeId> refineTypeFunction(
                 }
             }
 
-            // If the target type is a table, then simplification already implements the logic to deal with refinements properly since the
-            // type of the discriminant is guaranteed to only ever be an (arbitrarily-nested) table of a single property type.
-            if (get<TableType>(target))
+            if (FFlag::LuauOptimizeFalsyAndTruthyIntersect)
             {
-                SimplifyResult result = simplifyIntersection(ctx->builtins, ctx->arena, target, discriminant);
-                if (!result.blockedTypes.empty())
-                    return {nullptr, {result.blockedTypes.begin(), result.blockedTypes.end()}};
-
-                return {result.result, {}};
+                // If the target type is a table, then simplification already implements the logic to deal with refinements properly since the
+                // type of the discriminant is guaranteed to only ever be an (arbitrarily-nested) table of a single property type.
+                // We also fire for simple discriminants such as false? and ~(false?): the falsy and truthy types respectively
+                // NOTE: It would be nice to be able to do a simple intersection for something like:
+                //
+                //  { a: A, b: B, ... } & { x: X }
+                //
+                if (is<TableType>(target) || isSimpleDiscriminant(discriminant))
+                {
+                    SimplifyResult result = simplifyIntersection(ctx->builtins, ctx->arena, target, discriminant);
+                    if (!result.blockedTypes.empty())
+                        return {nullptr, {result.blockedTypes.begin(), result.blockedTypes.end()}};
+                    return {result.result, {}};
+                }
             }
+            else
+            {
+                // If the target type is a table, then simplification already implements the logic to deal with refinements properly since the
+                // type of the discriminant is guaranteed to only ever be an (arbitrarily-nested) table of a single property type.
+                if (get<TableType>(target))
+                {
+                    SimplifyResult result = simplifyIntersection(ctx->builtins, ctx->arena, target, discriminant);
+                    if (!result.blockedTypes.empty())
+                        return {nullptr, {result.blockedTypes.begin(), result.blockedTypes.end()}};
+
+                    return {result.result, {}};
+                }
+            }
+
 
             // In the general case, we'll still use normalization though.
             TypeId intersection = ctx->arena->addType(IntersectionType{{target, discriminant}});
@@ -2485,6 +2563,8 @@ TypeFunctionReductionResult<TypeId> intersectTypeFunction(
 
     // fold over the types with `simplifyIntersection`
     TypeId resultTy = ctx->builtins->unknownType;
+    // collect types which caused intersection to return never
+    DenseHashSet<TypeId> unintersectableTypes{nullptr};
     for (auto ty : types)
     {
         // skip any `*no-refine*` types.
@@ -2492,6 +2572,17 @@ TypeFunctionReductionResult<TypeId> intersectTypeFunction(
             continue;
 
         SimplifyResult result = simplifyIntersection(ctx->builtins, ctx->arena, resultTy, ty);
+
+        if (FFlag::LuauNarrowIntersectionNevers)
+        {
+            // If simplifying the intersection returned never, note the type we tried to intersect it with, and continue trying to intersect with the
+            // rest
+            if (get<NeverType>(result.result))
+            {
+                unintersectableTypes.insert(follow(ty));
+                continue;
+            }
+        }
 
         if (FFlag::LuauIntersectNotNil)
         {
@@ -2508,6 +2599,24 @@ TypeFunctionReductionResult<TypeId> intersectTypeFunction(
         }
 
         resultTy = result.result;
+    }
+
+    if (FFlag::LuauNarrowIntersectionNevers)
+    {
+        if (!unintersectableTypes.empty())
+        {
+            unintersectableTypes.insert(resultTy);
+            if (unintersectableTypes.size() > 1)
+            {
+                TypeId intersection =
+                    ctx->arena->addType(IntersectionType{std::vector<TypeId>(unintersectableTypes.begin(), unintersectableTypes.end())});
+                return {intersection, Reduction::MaybeOk, {}, {}};
+            }
+            else
+            {
+                return {*unintersectableTypes.begin(), Reduction::MaybeOk, {}, {}};
+            }
+        }
     }
 
     // if the intersection simplifies to `never`, this gives us bad autocomplete.
@@ -2572,7 +2681,7 @@ bool computeKeysOf(TypeId ty, Set<std::string>& result, DenseHashSet<TypeId>& se
         return res;
     }
 
-    if (auto classTy = get<ClassType>(ty))
+    if (auto classTy = get<ExternType>(ty))
     {
         for (auto [key, _] : classTy->props)
             result.insert(key);
@@ -2595,7 +2704,7 @@ bool computeKeysOf(TypeId ty, Set<std::string>& result, DenseHashSet<TypeId>& se
         return res;
     }
 
-    // this should not be reachable since the type should be a valid tables or classes part from normalization.
+    // this should not be reachable since the type should be a valid tables or extern types part from normalization.
     LUAU_ASSERT(false);
     return false;
 }
@@ -2621,9 +2730,9 @@ TypeFunctionReductionResult<TypeId> keyofFunctionImpl(
     if (!normTy)
         return {std::nullopt, Reduction::MaybeOk, {}, {}};
 
-    // if we don't have either just tables or just classes, we've got nothing to get keys of (at least until a future version perhaps adds classes
+    // if we don't have either just tables or just extern types, we've got nothing to get keys of (at least until a future version perhaps adds extern types
     // as well)
-    if (normTy->hasTables() == normTy->hasClasses())
+    if (normTy->hasTables() == normTy->hasExternTypes())
         return {std::nullopt, Reduction::Erroneous, {}, {}};
 
     // this is sort of atrocious, but we're trying to reject any type that has not normalized to a table or a union of tables.
@@ -2634,31 +2743,31 @@ TypeFunctionReductionResult<TypeId> keyofFunctionImpl(
     // we're going to collect the keys in here
     Set<std::string> keys{{}};
 
-    // computing the keys for classes
-    if (normTy->hasClasses())
+    // computing the keys for extern types
+    if (normTy->hasExternTypes())
     {
         LUAU_ASSERT(!normTy->hasTables());
 
-        // seen set for key computation for classes
+        // seen set for key computation for extern types
         DenseHashSet<TypeId> seen{{}};
 
-        auto classesIter = normTy->classes.ordering.begin();
-        auto classesIterEnd = normTy->classes.ordering.end();
-        LUAU_ASSERT(classesIter != classesIterEnd); // should be guaranteed by the `hasClasses` check earlier
+        auto externTypeIter = normTy->externTypes.ordering.begin();
+        auto externTypeIterEnd = normTy->externTypes.ordering.end();
+        LUAU_ASSERT(externTypeIter != externTypeIterEnd); // should be guaranteed by the `hasExternTypes` check earlier
 
         // collect all the properties from the first class type
-        if (!computeKeysOf(*classesIter, keys, seen, isRaw, ctx))
+        if (!computeKeysOf(*externTypeIter, keys, seen, isRaw, ctx))
             return {ctx->builtins->stringType, Reduction::MaybeOk, {}, {}}; // if it failed, we have a top type!
 
         // we need to look at each class to remove any keys that are not common amongst them all
-        while (++classesIter != classesIterEnd)
+        while (++externTypeIter != externTypeIterEnd)
         {
             seen.clear(); // we'll reuse the same seen set
 
             Set<std::string> localKeys{{}};
 
             // we can skip to the next class if this one is a top type
-            if (!computeKeysOf(*classesIter, localKeys, seen, isRaw, ctx))
+            if (!computeKeysOf(*externTypeIter, localKeys, seen, isRaw, ctx))
                 continue;
 
             for (auto& key : keys)
@@ -2673,7 +2782,7 @@ TypeFunctionReductionResult<TypeId> keyofFunctionImpl(
     // computing the keys for tables
     if (normTy->hasTables())
     {
-        LUAU_ASSERT(!normTy->hasClasses());
+        LUAU_ASSERT(!normTy->hasExternTypes());
 
         // seen set for key computation for tables
         DenseHashSet<TypeId> seen{{}};
@@ -2835,7 +2944,7 @@ bool searchPropsAndIndexer(
     return false;
 }
 
-/* Handles recursion / metamethods of tables/classes
+/* Handles recursion / metamethods of tables and extern types
    `isRaw` parameter indicates whether or not we should follow __index metamethods
    returns false if property of `ty` could not be found */
 bool tblIndexInto_DEPRECATED(TypeId indexer, TypeId indexee, DenseHashSet<TypeId>& result, NotNull<TypeFunctionContext> ctx, bool isRaw)
@@ -3010,11 +3119,11 @@ TypeFunctionReductionResult<TypeId> indexFunctionImpl(
             return {ctx->builtins->anyType, Reduction::MaybeOk, {}, {}};
     }
 
-    // if we don't have either just tables or just classes, we've got nothing to index into
-    if (indexeeNormTy->hasTables() == indexeeNormTy->hasClasses())
+    // if we don't have either just tables or just extern types, we've got nothing to index into
+    if (indexeeNormTy->hasTables() == indexeeNormTy->hasExternTypes())
         return {std::nullopt, Reduction::Erroneous, {}, {}};
 
-    // we're trying to reject any type that has not normalized to a table/class or a union of tables/classes.
+    // we're trying to reject any type that has not normalized to a table or extern type or a union of tables or extern types.
     if (indexeeNormTy->hasTops() || indexeeNormTy->hasBooleans() || indexeeNormTy->hasErrors() || indexeeNormTy->hasNils() ||
         indexeeNormTy->hasNumbers() || indexeeNormTy->hasStrings() || indexeeNormTy->hasThreads() || indexeeNormTy->hasBuffers() ||
         indexeeNormTy->hasFunctions() || indexeeNormTy->hasTyvars())
@@ -3045,18 +3154,18 @@ TypeFunctionReductionResult<TypeId> indexFunctionImpl(
 
     DenseHashSet<TypeId> properties{{}}; // vector of types that will be returned
 
-    if (indexeeNormTy->hasClasses())
+    if (indexeeNormTy->hasExternTypes())
     {
         LUAU_ASSERT(!indexeeNormTy->hasTables());
 
-        if (isRaw) // rawget should never reduce for classes (to match the behavior of the rawget global function)
+        if (isRaw) // rawget should never reduce for extern types (to match the behavior of the rawget global function)
             return {std::nullopt, Reduction::Erroneous, {}, {}};
 
-        // at least one class is guaranteed to be in the iterator by .hasClasses()
-        for (auto classesIter = indexeeNormTy->classes.ordering.begin(); classesIter != indexeeNormTy->classes.ordering.end(); ++classesIter)
+        // at least one class is guaranteed to be in the iterator by .hasExternTypes()
+        for (auto externTypeIter = indexeeNormTy->externTypes.ordering.begin(); externTypeIter != indexeeNormTy->externTypes.ordering.end(); ++externTypeIter)
         {
-            auto classTy = get<ClassType>(*classesIter);
-            if (!classTy)
+            auto externTy = get<ExternType>(*externTypeIter);
+            if (!externTy)
             {
                 LUAU_ASSERT(false); // this should not be possible according to normalization's spec
                 return {std::nullopt, Reduction::Erroneous, {}, {}};
@@ -3065,16 +3174,16 @@ TypeFunctionReductionResult<TypeId> indexFunctionImpl(
             for (TypeId ty : *typesToFind)
             {
                 // Search for all instances of indexer in class->props and class->indexer
-                if (searchPropsAndIndexer(ty, classTy->props, classTy->indexer, properties, ctx))
+                if (searchPropsAndIndexer(ty, externTy->props, externTy->indexer, properties, ctx))
                     continue; // Indexer was found in this class, so we can move on to the next
 
-                auto parent = classTy->parent;
+                auto parent = externTy->parent;
                 bool foundInParent = false;
                 while (parent && !foundInParent)
                 {
-                    auto parentClass = get<ClassType>(follow(*parent));
-                    foundInParent = searchPropsAndIndexer(ty, parentClass->props, parentClass->indexer, properties, ctx);
-                    parent = parentClass->parent;
+                    auto parentExternType = get<ExternType>(follow(*parent));
+                    foundInParent = searchPropsAndIndexer(ty, parentExternType->props, parentExternType->indexer, properties, ctx);
+                    parent = parentExternType->parent;
                 }
 
                 // we move on to the next type if any of the parents we went through had the property.
@@ -3086,7 +3195,7 @@ TypeFunctionReductionResult<TypeId> indexFunctionImpl(
                 // findMetatableEntry demands the ability to emit errors, so we must give it
                 // the necessary state to do that, even if we intend to just eat the errors.
                 ErrorVec dummy;
-                std::optional<TypeId> mmType = findMetatableEntry(ctx->builtins, dummy, *classesIter, "__index", Location{});
+                std::optional<TypeId> mmType = findMetatableEntry(ctx->builtins, dummy, *externTypeIter, "__index", Location{});
                 if (!mmType) // if a metatable does not exist, there is no where else to look
                     return {std::nullopt, Reduction::Erroneous, {}, {}};
 
@@ -3098,7 +3207,7 @@ TypeFunctionReductionResult<TypeId> indexFunctionImpl(
 
     if (indexeeNormTy->hasTables())
     {
-        LUAU_ASSERT(!indexeeNormTy->hasClasses());
+        LUAU_ASSERT(!indexeeNormTy->hasExternTypes());
 
         // at least one table is guaranteed to be in the iterator by .hasTables()
         for (auto tablesIter = indexeeNormTy->tables.begin(); tablesIter != indexeeNormTy->tables.end(); ++tablesIter)
@@ -3193,7 +3302,7 @@ TypeFunctionReductionResult<TypeId> setmetatableTypeFunction(
     // we're trying to reject any type that has not normalized to a table or a union/intersection of tables.
     if (targetNorm->hasTops() || targetNorm->hasBooleans() || targetNorm->hasErrors() || targetNorm->hasNils() || targetNorm->hasNumbers() ||
         targetNorm->hasStrings() || targetNorm->hasThreads() || targetNorm->hasBuffers() || targetNorm->hasFunctions() || targetNorm->hasTyvars() ||
-        targetNorm->hasClasses())
+        targetNorm->hasExternTypes())
         return {std::nullopt, Reduction::Erroneous, {}, {}};
 
     // if the supposed metatable is not a table, we will fail to reduce.
@@ -3267,7 +3376,7 @@ static TypeFunctionReductionResult<TypeId> getmetatableHelper(TypeId targetTy, c
         erroneous = false;
     }
 
-    if (auto clazz = get<ClassType>(targetTy))
+    if (auto clazz = get<ExternType>(targetTy))
     {
         metatable = clazz->metatable;
         erroneous = false;
@@ -3413,8 +3522,8 @@ BuiltinTypeFunctions::BuiltinTypeFunctions()
     , powFunc{"pow", powTypeFunction}
     , modFunc{"mod", modTypeFunction}
     , concatFunc{"concat", concatTypeFunction}
-    , andFunc{"and", andTypeFunction}
-    , orFunc{"or", orTypeFunction}
+    , andFunc{"and", andTypeFunction, /*canReduceGenerics*/ true}
+    , orFunc{"or", orTypeFunction, /*canReduceGenerics*/ true}
     , ltFunc{"lt", ltTypeFunction}
     , leFunc{"le", leTypeFunction}
     , eqFunc{"eq", eqTypeFunction}

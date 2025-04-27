@@ -7,6 +7,7 @@
 #include "lualib.h"
 
 #include "Luau/Repl.h"
+#include "Luau/Require.h"
 #include "Luau/FileUtils.h"
 
 #include "doctest.h"
@@ -465,6 +466,20 @@ TEST_CASE_FIXTURE(ReplWithPathFixture, "CheckCachedResult")
     assertOutputContainsAll({"true"});
 }
 
+TEST_CASE_FIXTURE(ReplWithPathFixture, "RegisterRuntimeModule")
+{
+    lua_pushcfunction(L, luarequire_registermodule, nullptr);
+    lua_pushstring(L, "@test/helloworld");
+    lua_newtable(L);
+    lua_pushstring(L, "hello");
+    lua_pushstring(L, "world");
+    lua_settable(L, -3);
+    lua_call(L, 2, 0);
+
+    runCode(L, "return require('@test/helloworld').hello == 'world'");
+    assertOutputContainsAll({"true"});
+}
+
 TEST_CASE_FIXTURE(ReplWithPathFixture, "LoadStringRelative")
 {
     runCode(L, "return pcall(function() return loadstring(\"require('a/relative/path')\")() end)");
@@ -544,7 +559,9 @@ TEST_CASE_FIXTURE(ReplWithPathFixture, "RequireFromLuauBinary")
     char executable[] = "luau";
     std::vector<std::string> paths = {
         getLuauDirectory(PathType::Relative) + "/tests/require/without_config/dependency.luau",
-        getLuauDirectory(PathType::Absolute) + "/tests/require/without_config/dependency.luau"
+        getLuauDirectory(PathType::Absolute) + "/tests/require/without_config/dependency.luau",
+        getLuauDirectory(PathType::Relative) + "/tests/require/without_config/module.luau",
+        getLuauDirectory(PathType::Absolute) + "/tests/require/without_config/module.luau",
     };
 
     for (const std::string& path : paths)

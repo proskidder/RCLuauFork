@@ -21,10 +21,8 @@
 #include <memory>
 #include <optional>
 
-
 using namespace Luau;
 
-LUAU_FASTFLAG(LuauAutocompleteRefactorsForIncrementalAutocomplete)
 LUAU_FASTINT(LuauParseErrorLimit)
 LUAU_FASTFLAG(LuauCloneIncrementalModule)
 
@@ -35,19 +33,18 @@ LUAU_FASTFLAG(LuauBetterReverseDependencyTracking)
 LUAU_FASTFLAG(LuauAutocompleteUsesModuleForTypeCompatibility)
 LUAU_FASTFLAG(LuauBetterCursorInCommentDetection)
 LUAU_FASTFLAG(LuauAllFreeTypesHaveScopes)
-LUAU_FASTFLAG(LuauTrackInteriorFreeTypesOnScope)
 LUAU_FASTFLAG(LuauClonedTableAndFunctionTypesMustHaveScopes)
 LUAU_FASTFLAG(LuauDisableNewSolverAssertsInMixedMode)
 LUAU_FASTFLAG(LuauCloneTypeAliasBindings)
 LUAU_FASTFLAG(LuauDoNotClonePersistentBindings)
-LUAU_FASTFLAG(LuauCloneReturnTypePack)
 LUAU_FASTFLAG(LuauIncrementalAutocompleteDemandBasedCloning)
 LUAU_FASTFLAG(LuauUserTypeFunTypecheck)
 LUAU_FASTFLAG(LuauBetterScopeSelection)
 LUAU_FASTFLAG(LuauBlockDiffFragmentSelection)
 LUAU_FASTFLAG(LuauFragmentAcMemoryLeak)
+LUAU_FASTFLAG(LuauGlobalVariableModuleIsolation)
 
-static std::optional<AutocompleteEntryMap> nullCallback(std::string tag, std::optional<const ClassType*> ptr, std::optional<std::string> contents)
+static std::optional<AutocompleteEntryMap> nullCallback(std::string tag, std::optional<const ExternType*> ptr, std::optional<std::string> contents)
 {
     return std::nullopt;
 }
@@ -75,7 +72,6 @@ struct FragmentAutocompleteFixtureImpl : BaseType
 {
     static_assert(std::is_base_of_v<Fixture, BaseType>, "BaseType must be a descendant of Fixture");
 
-    ScopedFastFlag luauAutocompleteRefactorsForIncrementalAutocomplete{FFlag::LuauAutocompleteRefactorsForIncrementalAutocomplete, true};
     ScopedFastFlag luauFreeTypesMustHaveBounds{FFlag::LuauFreeTypesMustHaveBounds, true};
     ScopedFastFlag luauCloneIncrementalModule{FFlag::LuauCloneIncrementalModule, true};
     ScopedFastFlag luauAllFreeTypesHaveScopes{FFlag::LuauAllFreeTypesHaveScopes, true};
@@ -83,12 +79,12 @@ struct FragmentAutocompleteFixtureImpl : BaseType
     ScopedFastFlag luauDisableNewSolverAssertsInMixedMode{FFlag::LuauDisableNewSolverAssertsInMixedMode, true};
     ScopedFastFlag luauCloneTypeAliasBindings{FFlag::LuauCloneTypeAliasBindings, true};
     ScopedFastFlag luauDoNotClonePersistentBindings{FFlag::LuauDoNotClonePersistentBindings, true};
-    ScopedFastFlag luauCloneReturnTypePack{FFlag::LuauCloneReturnTypePack, true};
     ScopedFastFlag luauIncrementalAutocompleteDemandBasedCloning{FFlag::LuauIncrementalAutocompleteDemandBasedCloning, true};
     ScopedFastFlag luauBetterScopeSelection{FFlag::LuauBetterScopeSelection, true};
     ScopedFastFlag luauBlockDiffFragmentSelection{FFlag::LuauBlockDiffFragmentSelection, true};
     ScopedFastFlag luauAutocompleteUsesModuleForTypeCompatibility{FFlag::LuauAutocompleteUsesModuleForTypeCompatibility, true};
     ScopedFastFlag luauFragmentAcMemoryLeak{FFlag::LuauFragmentAcMemoryLeak, true};
+    ScopedFastFlag luauGlobalVariableModuleIsolation{FFlag::LuauGlobalVariableModuleIsolation, true};
 
     FragmentAutocompleteFixtureImpl()
         : BaseType(true)
@@ -387,7 +383,7 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "inside_do")
         R"(
 local x = 4
 do
-   
+
 end
 )",
         {3, 3}
@@ -493,7 +489,7 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "writing_func_annotation")
 {
     auto region = getAutocompleteRegion(
         R"(
-function f(arg1 : T 
+function f(arg1 : T
 )",
         {1, 19}
     );
@@ -756,7 +752,7 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_partial")
 {
     auto region = getAutocompleteRegion(
         R"(
-if 
+if
 )",
         Position{1, 3}
     );
@@ -769,7 +765,7 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_partial_in_condition_at")
 {
     auto region = getAutocompleteRegion(
         R"(
-if true 
+if true
 )",
         Position{1, 7}
     );
@@ -782,7 +778,7 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_partial_in_condition_after")
 {
     auto region = getAutocompleteRegion(
         R"(
-if true 
+if true
 )",
         Position{1, 8}
     );
@@ -839,7 +835,7 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_else_if")
     auto region = getAutocompleteRegion(
         R"(
 if true then
-elseif 
+elseif
 end
 
 )",
@@ -855,7 +851,7 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_else_if_no_end")
     auto region = getAutocompleteRegion(
         R"(
 if true then
-elseif 
+elseif
 )",
         Position{2, 8}
     );
@@ -1464,7 +1460,7 @@ local tbl = { abc = 1234}
     auto fragment = autocompleteFragment(
         R"(
 local tbl = { abc = 1234}
-tbl. 
+tbl.
 )",
         Position{2, 5}
     );
@@ -1590,7 +1586,7 @@ local tbl = { abc = 1234}
 )";
     const std::string updated = R"(
 local tbl = { abc = 1234}
-tbl. 
+tbl.
 )";
 
     autocompleteFragmentInBothSolvers(
@@ -1645,7 +1641,7 @@ end
 local function f2(a2)
     local l2 = 1;
     g2 = 1;
-end 
+end
 )";
 
     autocompleteFragmentInBothSolvers(
@@ -3028,7 +3024,6 @@ z:a
 
 TEST_CASE_FIXTURE(FragmentAutocompleteBuiltinsFixture, "interior_free_types_assertion_caused_by_free_type_inheriting_null_scope_from_table")
 {
-    ScopedFastFlag sff{FFlag::LuauTrackInteriorFreeTypesOnScope, true};
     const std::string source = R"(--!strict
 local foo
 local a = foo()
@@ -3597,6 +3592,30 @@ end
             CHECK(res.result->acResults.entryMap.count("foo"));
         }
     );
+}
+
+TEST_CASE_FIXTURE(FragmentAutocompleteBuiltinsFixture, "NotNull_assertion_caused_by_leaking_free_type_from_stale_module")
+{
+    const std::string source = R"(
+local Players = game:GetService("Players")
+
+Players.PlayerAdded:Connect(function(Player)
+    for_,v in script.PlayerValue:GetChildren()do
+        v
+    end
+end)
+)";
+
+    const std::string dest = R"(
+local Players = game:GetService("Players")
+
+Players.PlayerAdded:Connect(function(Player)
+    for_,v in script.PlayerValue:GetChildren()do
+        v:L
+    end
+end)
+)";
+    autocompleteFragmentInBothSolvers(source, dest, Position{5, 11}, [](auto& result) {});
 }
 // NOLINTEND(bugprone-unchecked-optional-access)
 

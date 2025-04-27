@@ -22,7 +22,6 @@
 #include <algorithm>
 
 LUAU_FASTFLAGVARIABLE(DebugLuauSubtypingCheckPathValidity)
-LUAU_FASTFLAGVARIABLE(LuauSubtypingStopAtNormFail)
 LUAU_FASTINTVARIABLE(LuauSubtypingReasoningLimit, 100)
 LUAU_FASTFLAGVARIABLE(LuauSubtypingEnableReasoningLimit)
 
@@ -316,7 +315,7 @@ struct ApplyMappedGenerics : Substitution
 
     bool ignoreChildren(TypeId ty) override
     {
-        if (get<ClassType>(ty))
+        if (get<ExternType>(ty))
             return true;
 
         return ty->persistent;
@@ -424,7 +423,7 @@ SubtypingResult Subtyping::isSubtype(TypeId subTy, TypeId superTy, NotNull<Scope
 
     SubtypingResult result = isCovariantWith(env, subTy, superTy, scope);
 
-    if (FFlag::LuauSubtypingStopAtNormFail && result.normalizationTooComplex)
+    if (result.normalizationTooComplex)
     {
         if (result.isCacheable)
             resultCache[{subTy, superTy}] = result;
@@ -610,7 +609,7 @@ SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, TypeId sub
         {
             SubtypingResult semantic = isCovariantWith(env, normalizer->normalize(subTy), normalizer->normalize(superTy), scope);
 
-            if (FFlag::LuauSubtypingStopAtNormFail && semantic.normalizationTooComplex)
+            if (semantic.normalizationTooComplex)
             {
                 result = semantic;
             }
@@ -630,7 +629,7 @@ SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, TypeId sub
         {
             SubtypingResult semantic = isCovariantWith(env, normalizer->normalize(subTy), normalizer->normalize(superTy), scope);
 
-            if (FFlag::LuauSubtypingStopAtNormFail && semantic.normalizationTooComplex)
+            if (semantic.normalizationTooComplex)
             {
                 result = semantic;
             }
@@ -745,9 +744,9 @@ SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, TypeId sub
         result = isCovariantWith(env, p, scope);
     else if (auto p = get2<MetatableType, TableType>(subTy, superTy))
         result = isCovariantWith(env, p, scope);
-    else if (auto p = get2<ClassType, ClassType>(subTy, superTy))
+    else if (auto p = get2<ExternType, ExternType>(subTy, superTy))
         result = isCovariantWith(env, p, scope);
-    else if (auto p = get2<ClassType, TableType>(subTy, superTy))
+    else if (auto p = get2<ExternType, TableType>(subTy, superTy))
         result = isCovariantWith(env, subTy, p.first, superTy, p.second, scope);
     else if (auto p = get2<TableType, PrimitiveType>(subTy, superTy))
         result = isCovariantWith(env, p, scope);
@@ -1110,7 +1109,7 @@ SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, TypeId sub
     {
         SubtypingResult next = isCovariantWith(env, subTy, ty, scope);
 
-        if (FFlag::LuauSubtypingStopAtNormFail && next.normalizationTooComplex)
+        if (next.normalizationTooComplex)
             return SubtypingResult{false, /* normalizationTooComplex */ true};
 
         if (next.isSubtype)
@@ -1134,7 +1133,7 @@ SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, const Unio
     {
         subtypings.push_back(isCovariantWith(env, ty, superTy, scope).withSubComponent(TypePath::Index{i++, TypePath::Index::Variant::Union}));
 
-        if (FFlag::LuauSubtypingStopAtNormFail && subtypings.back().normalizationTooComplex)
+        if (subtypings.back().normalizationTooComplex)
             return SubtypingResult{false, /* normalizationTooComplex */ true};
     }
 
@@ -1150,7 +1149,7 @@ SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, TypeId sub
     {
         subtypings.push_back(isCovariantWith(env, subTy, ty, scope).withSuperComponent(TypePath::Index{i++, TypePath::Index::Variant::Intersection}));
 
-        if (FFlag::LuauSubtypingStopAtNormFail && subtypings.back().normalizationTooComplex)
+        if (subtypings.back().normalizationTooComplex)
             return SubtypingResult{false, /* normalizationTooComplex */ true};
     }
 
@@ -1166,7 +1165,7 @@ SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, const Inte
     {
         subtypings.push_back(isCovariantWith(env, ty, superTy, scope).withSubComponent(TypePath::Index{i++, TypePath::Index::Variant::Intersection}));
 
-        if (FFlag::LuauSubtypingStopAtNormFail && subtypings.back().normalizationTooComplex)
+        if (subtypings.back().normalizationTooComplex)
             return SubtypingResult{false, /* normalizationTooComplex */ true};
     }
 
@@ -1337,7 +1336,7 @@ SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, const Type
     }
     // the top class type is not actually a primitive type, so the negation of
     // any one of them includes the top class type.
-    else if (auto p = get2<ClassType, PrimitiveType>(subTy, negatedTy))
+    else if (auto p = get2<ExternType, PrimitiveType>(subTy, negatedTy))
         result = {true};
     else if (auto p = get<PrimitiveType>(negatedTy); p && is<TableType, MetatableType>(subTy))
         result = {p->type != PrimitiveType::Table};
@@ -1345,9 +1344,9 @@ SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, const Type
         result = {p.second->type != PrimitiveType::Function};
     else if (auto p = get2<SingletonType, SingletonType>(subTy, negatedTy))
         result = {*p.first != *p.second};
-    else if (auto p = get2<ClassType, ClassType>(subTy, negatedTy))
+    else if (auto p = get2<ExternType, ExternType>(subTy, negatedTy))
         result = SubtypingResult::negate(isCovariantWith(env, p.first, p.second, scope));
-    else if (get2<FunctionType, ClassType>(subTy, negatedTy))
+    else if (get2<FunctionType, ExternType>(subTy, negatedTy))
         result = {true};
     else if (is<ErrorType, FunctionType, TableType, MetatableType>(negatedTy))
         iceReporter->ice("attempting to negate a non-testable type");
@@ -1472,15 +1471,15 @@ SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, const Meta
     }
 }
 
-SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, const ClassType* subClass, const ClassType* superClass, NotNull<Scope> scope)
+SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, const ExternType* subExternType, const ExternType* superExternType, NotNull<Scope> scope)
 {
-    return {isSubclass(subClass, superClass)};
+    return {isSubclass(subExternType, superExternType)};
 }
 
 SubtypingResult Subtyping::isCovariantWith(
     SubtypingEnvironment& env,
     TypeId subTy,
-    const ClassType* subClass,
+    const ExternType* subExternType,
     TypeId superTy,
     const TableType* superTable,
     NotNull<Scope> scope
@@ -1492,7 +1491,7 @@ SubtypingResult Subtyping::isCovariantWith(
 
     for (const auto& [name, prop] : superTable->props)
     {
-        if (auto classProp = lookupClassProp(subClass, name))
+        if (auto classProp = lookupExternTypeProp(subExternType, name))
         {
             result.andAlso(isCovariantWith(env, *classProp, prop, name, scope));
         }
@@ -1662,7 +1661,7 @@ SubtypingResult Subtyping::isCovariantWith(
     SubtypingResult result = isCovariantWith(env, subNorm->tops, superNorm->tops, scope);
     result.andAlso(isCovariantWith(env, subNorm->booleans, superNorm->booleans, scope));
     result.andAlso(
-        isCovariantWith(env, subNorm->classes, superNorm->classes, scope).orElse(isCovariantWith(env, subNorm->classes, superNorm->tables, scope))
+        isCovariantWith(env, subNorm->externTypes, superNorm->externTypes, scope).orElse(isCovariantWith(env, subNorm->externTypes, superNorm->tables, scope))
     );
     result.andAlso(isCovariantWith(env, subNorm->errors, superNorm->errors, scope));
     result.andAlso(isCovariantWith(env, subNorm->nils, superNorm->nils, scope));
@@ -1679,24 +1678,24 @@ SubtypingResult Subtyping::isCovariantWith(
 
 SubtypingResult Subtyping::isCovariantWith(
     SubtypingEnvironment& env,
-    const NormalizedClassType& subClass,
-    const NormalizedClassType& superClass,
+    const NormalizedExternType& subExternType,
+    const NormalizedExternType& superExternType,
     NotNull<Scope> scope
 )
 {
-    for (const auto& [subClassTy, _] : subClass.classes)
+    for (const auto& [subExternTypeTy, _] : subExternType.externTypes)
     {
         SubtypingResult result;
 
-        for (const auto& [superClassTy, superNegations] : superClass.classes)
+        for (const auto& [superExternTypeTy, superNegations] : superExternType.externTypes)
         {
-            result.orElse(isCovariantWith(env, subClassTy, superClassTy, scope));
+            result.orElse(isCovariantWith(env, subExternTypeTy, superExternTypeTy, scope));
             if (!result.isSubtype)
                 continue;
 
             for (TypeId negation : superNegations)
             {
-                result.andAlso(SubtypingResult::negate(isCovariantWith(env, subClassTy, negation, scope)));
+                result.andAlso(SubtypingResult::negate(isCovariantWith(env, subExternTypeTy, negation, scope)));
                 if (result.isSubtype)
                     break;
             }
@@ -1711,17 +1710,17 @@ SubtypingResult Subtyping::isCovariantWith(
 
 SubtypingResult Subtyping::isCovariantWith(
     SubtypingEnvironment& env,
-    const NormalizedClassType& subClass,
+    const NormalizedExternType& subExternType,
     const TypeIds& superTables,
     NotNull<Scope> scope
 )
 {
-    for (const auto& [subClassTy, _] : subClass.classes)
+    for (const auto& [subExternTypeTy, _] : subExternType.externTypes)
     {
         SubtypingResult result;
 
         for (TypeId superTableTy : superTables)
-            result.orElse(isCovariantWith(env, subClassTy, superTableTy, scope));
+            result.orElse(isCovariantWith(env, subExternTypeTy, superTableTy, scope));
 
         if (!result.isSubtype)
             return result;
@@ -1812,7 +1811,7 @@ SubtypingResult Subtyping::isCovariantWith(SubtypingEnvironment& env, const Type
         {
             results.back().orElse(isCovariantWith(env, subTy, superTy, scope));
 
-            if (FFlag::LuauSubtypingStopAtNormFail && results.back().normalizationTooComplex)
+            if (results.back().normalizationTooComplex)
                 return SubtypingResult{false, /* normalizationTooComplex */ true};
         }
     }

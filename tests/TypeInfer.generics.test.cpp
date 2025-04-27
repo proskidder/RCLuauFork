@@ -13,6 +13,8 @@
 LUAU_FASTFLAG(LuauInstantiateInSubtyping)
 LUAU_FASTFLAG(LuauSolverV2)
 LUAU_FASTFLAG(LuauImproveTypePathsInErrors)
+LUAU_FASTFLAG(LuauAddCallConstraintForIterableFunctions)
+LUAU_FASTFLAG(LuauIntersectNotNil)
 
 using namespace Luau;
 
@@ -144,8 +146,6 @@ TEST_CASE_FIXTURE(Fixture, "properties_can_be_polytypes")
 
 TEST_CASE_FIXTURE(Fixture, "properties_can_be_instantiated_polytypes")
 {
-    DOES_NOT_PASS_NEW_SOLVER_GUARD();
-
     CheckResult result = check(R"(
         local t: { m: (number)->number } = { m = function(x:number) return x+1 end }
         local function id<a>(x:a):a return x end
@@ -260,25 +260,10 @@ TEST_CASE_FIXTURE(Fixture, "check_mutual_generic_functions_errors")
     }
 }
 
-TEST_CASE_FIXTURE(Fixture, "generic_functions_in_types_old_solver")
+TEST_CASE_FIXTURE(Fixture, "generic_functions_in_types")
 {
-    DOES_NOT_PASS_NEW_SOLVER_GUARD();
-
     CheckResult result = check(R"(
         type T = { id: <a>(a) -> a }
-        local x: T = { id = function<a>(x:a):a return x end }
-        local y: string = x.id("hi")
-        local z: number = x.id(37)
-    )");
-    LUAU_REQUIRE_NO_ERRORS(result);
-}
-
-TEST_CASE_FIXTURE(Fixture, "generic_functions_in_types_new_solver")
-{
-    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
-
-    CheckResult result = check(R"(
-        type T = { read id: <a>(a) -> a }
         local x: T = { id = function<a>(x:a):a return x end }
         local y: string = x.id("hi")
         local z: number = x.id(37)
@@ -311,8 +296,6 @@ TEST_CASE_FIXTURE(Fixture, "generic_factories")
 
 TEST_CASE_FIXTURE(Fixture, "factories_of_generics")
 {
-    DOES_NOT_PASS_NEW_SOLVER_GUARD();
-
     CheckResult result = check(R"(
         type T = { id: <a>(a) -> a }
         type Factory = { build: () -> T }
@@ -330,6 +313,7 @@ TEST_CASE_FIXTURE(Fixture, "factories_of_generics")
         local y: string = x.id("hi")
         local z: number = x.id(37)
     )");
+
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
@@ -509,6 +493,7 @@ TEST_CASE_FIXTURE(Fixture, "dont_substitute_bound_types")
             local x: T = t.m(37)
         end
     )");
+
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
@@ -850,7 +835,15 @@ function clone<X, Y>(dict: {[X]:Y}): {[X]:Y}
 end
     )");
 
-    LUAU_REQUIRE_NO_ERRORS(result);
+    if (FFlag::LuauSolverV2 && FFlag::LuauAddCallConstraintForIterableFunctions && !FFlag::LuauIntersectNotNil)
+    {
+        LUAU_REQUIRE_ERROR_COUNT(1, result);
+        CHECK(get<UninhabitedTypeFunction>(result.errors.at(0)));
+    }
+    else
+    {
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "generic_functions_should_be_memory_safe")
@@ -1370,29 +1363,27 @@ TEST_CASE_FIXTURE(Fixture, "substitution_with_bound_table")
 
 TEST_CASE_FIXTURE(Fixture, "apply_type_function_nested_generics1")
 {
-    // CLI-114507: temporarily changed to have a cast for `object` to silence false positive error
-
     // https://github.com/luau-lang/luau/issues/484
     CheckResult result = check(R"(
---!strict
-type MyObject = {
-	getReturnValue: <V>(cb: () -> V) -> V
-}
-local object: MyObject = {
-	getReturnValue = function<U>(cb: () -> U): U
-		return cb()
-	end,
-} :: MyObject
+        --!strict
+        type MyObject = {
+            getReturnValue: <V>(cb: () -> V) -> V
+        }
+        local object: MyObject = {
+            getReturnValue = function<U>(cb: () -> U): U
+                return cb()
+            end,
+        }
 
-type ComplexObject<T> = {
-	id: T,
-	nested: MyObject
-}
+        type ComplexObject<T> = {
+            id: T,
+            nested: MyObject
+        }
 
-local complex: ComplexObject<string> = {
-	id = "Foo",
-	nested = object,
-}
+        local complex: ComplexObject<string> = {
+            id = "Foo",
+            nested = object,
+        }
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);

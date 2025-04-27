@@ -15,9 +15,8 @@
 using namespace Luau;
 
 LUAU_FASTFLAG(LuauSolverV2)
-LUAU_FASTFLAG(LuauNonReentrantGeneralization)
+LUAU_FASTFLAG(LuauNonReentrantGeneralization2)
 LUAU_FASTFLAG(DebugLuauForbidInternalTypes)
-LUAU_FASTFLAG(LuauTrackInteriorFreeTypesOnScope)
 LUAU_FASTFLAG(LuauTrackInferredFunctionTypeFromCall)
 
 TEST_SUITE_BEGIN("Generalization");
@@ -116,12 +115,12 @@ TEST_CASE_FIXTURE(GeneralizationFixture, "dont_traverse_into_class_types_when_ge
 {
     auto [propTy, _] = freshType();
 
-    TypeId cursedClass = arena.addType(ClassType{"Cursed", {{"oh_no", Property::readonly(propTy)}}, std::nullopt, std::nullopt, {}, {}, "", {}});
+    TypeId cursedExternType = arena.addType(ExternType{"Cursed", {{"oh_no", Property::readonly(propTy)}}, std::nullopt, std::nullopt, {}, {}, "", {}});
 
-    auto genClass = generalize(cursedClass);
-    REQUIRE(genClass);
+    auto genExternType = generalize(cursedExternType);
+    REQUIRE(genExternType);
 
-    auto genPropTy = get<ClassType>(*genClass)->props.at("oh_no").readTy;
+    auto genPropTy = get<ExternType>(*genExternType)->props.at("oh_no").readTy;
     CHECK(is<FreeType>(*genPropTy));
 }
 
@@ -227,7 +226,7 @@ TEST_CASE_FIXTURE(GeneralizationFixture, "('a) -> 'a")
 
 TEST_CASE_FIXTURE(GeneralizationFixture, "(t1, (t1 <: 'b)) -> () where t1 = ('a <: (t1 <: 'b) & {number} & {number})")
 {
-    ScopedFastFlag sff{FFlag::LuauNonReentrantGeneralization, true};
+    ScopedFastFlag sff{FFlag::LuauNonReentrantGeneralization2, true};
 
     TableType tt;
     tt.indexer = TableIndexer{builtinTypes.numberType, builtinTypes.numberType};
@@ -261,7 +260,7 @@ TEST_CASE_FIXTURE(GeneralizationFixture, "(('a <: number | string)) -> string?")
 
 TEST_CASE_FIXTURE(GeneralizationFixture, "(('a <: {'b})) -> ()")
 {
-    ScopedFastFlag sff{FFlag::LuauNonReentrantGeneralization, true};
+    ScopedFastFlag sff{FFlag::LuauNonReentrantGeneralization2, true};
 
     auto [aTy, aFree] = freshType();
     auto [bTy, bFree] = freshType();
@@ -344,7 +343,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "generalization_should_not_leak_free_type")
 {
     ScopedFastFlag sffs[] = {
         {FFlag::DebugLuauForbidInternalTypes, true},
-        {FFlag::LuauTrackInteriorFreeTypesOnScope, true},
         {FFlag::LuauTrackInferredFunctionTypeFromCall, true}
     };
 

@@ -20,7 +20,7 @@ struct SourceCode
         None,
         Module,
         Script,
-        Local
+        Local_DEPRECATED
     };
 
     std::string source;
@@ -117,8 +117,7 @@ struct FileResolver
         return std::nullopt;
     }
 
-    // Make non-virtual when removing FFlagLuauImproveRequireByStringAutocomplete.
-    virtual std::optional<RequireSuggestions> getRequireSuggestions(const ModuleName& requirer, const std::optional<std::string>& pathString) const;
+    std::optional<RequireSuggestions> getRequireSuggestions(const ModuleName& requirer, const std::optional<std::string>& pathString) const;
 
     std::shared_ptr<RequireSuggester> requireSuggester;
 };

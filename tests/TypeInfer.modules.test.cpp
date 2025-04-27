@@ -13,6 +13,9 @@
 LUAU_FASTFLAG(LuauInstantiateInSubtyping)
 LUAU_FASTFLAG(LuauSolverV2)
 LUAU_FASTFLAG(LuauImproveTypePathsInErrors)
+LUAU_FASTFLAG(LuauAddCallConstraintForIterableFunctions)
+LUAU_FASTFLAG(DebugLuauGreedyGeneralization)
+LUAU_FASTFLAG(LuauOptimizeFalsyAndTruthyIntersect)
 
 using namespace Luau;
 
@@ -231,7 +234,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "require_module_that_does_not_export")
 TEST_CASE_FIXTURE(BuiltinsFixture, "warn_if_you_try_to_require_a_non_modulescript")
 {
     fileResolver.source["Modules/A"] = "";
-    fileResolver.sourceTypes["Modules/A"] = SourceCode::Local;
+    fileResolver.sourceTypes["Modules/A"] = SourceCode::Script;
 
     fileResolver.source["Modules/B"] = R"(
         local M = require(script.Parent.A)
@@ -753,9 +756,53 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "spooky_blocked_type_laundered_by_bound_type"
         return Cache
     )";
 
-    LUAU_REQUIRE_NO_ERRORS(check(R"(
+    auto result = check(R"(
         local _ = require(game.A);
-    )"));
+    )");
+
+    if (FFlag::LuauAddCallConstraintForIterableFunctions && !FFlag::LuauOptimizeFalsyAndTruthyIntersect)
+    {
+        LUAU_REQUIRE_ERROR_COUNT(3, result);
+    }
+    else
+    {
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "leaky_generics")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
+    auto result = check(R"(
+        local Cache = {}
+
+        Cache.settings = {}
+
+        function Cache.should_cache(url)
+            for key, _ in pairs(Cache.settings) do
+                return key
+            end
+
+            return ""
+        end
+
+        function Cache.is_cached(url)
+            local setting_key = Cache.should_cache(url)
+            local settings = Cache.settings[setting_key]
+
+            return settings
+        end
+
+        return Cache
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    if (FFlag::DebugLuauGreedyGeneralization)
+    {
+        CHECK_EQ("(unknown) -> unknown", toString(requireTypeAtPosition({13, 23})));
+    }
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "cycles_dont_make_everything_any")
